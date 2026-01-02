@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReID结果 - 人员分组</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/bootstrap-icons.css">
+    <style>
+        body { padding: 20px; background-color: #f5f5f5; }
+        .stats-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+        .stat-item { text-align: center; }
+        .stat-number { font-size: 2.5rem; font-weight: bold; }
+        .stat-label { font-size: 1rem; opacity: 0.9; }
+        .group-card { margin-bottom: 20px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; transition: transform 0.2s; }
+        .group-card:hover { transform: translateY(-5px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .group-header { background: #f8f9fa; padding: 15px; border-bottom: 1px solid #ddd; }
+        .group-body { padding: 15px; }
+        .person-thumbnail { width: 120px; height: 160px; object-fit: cover; border-radius: 5px; margin: 5px; cursor: pointer; transition: transform 0.2s; }
+        .person-thumbnail:hover { transform: scale(1.05); }
+        .threshold-control { max-width: 500px; margin: 0 auto 30px; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .badge-sim { font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">ReID结果 - 人员分组</h1>
+
+        <!-- 统计卡片 -->
+        <div class="stats-card">
+            <div class="row">
+                <div class="col-md-3 stat-item">
+                    <div class="stat-number">{{ results.total_images }}</div>
+                    <div class="stat-label">图片数</div>
+                </div>
+                <div class="col-md-3 stat-item">
+                    <div class="stat-number">{{ results.total_persons }}</div>
+                    <div class="stat-label">检测人数</div>
+                </div>
+                <div class="col-md-3 stat-item">
+                    <div class="stat-number">{{ results.total_groups }}</div>
+                    <div class="stat-label">分组数</div>
+                </div>
+                <div class="col-md-3 stat-item">
+                    <div class="stat-number">{{ "%.2f"|format(results.config.similarity_threshold) }}</div>
+                    <div class="stat-label">相似度阈值</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 阈值调整控制 -->
+        <div class="threshold-control">
+            <label class="form-label"><strong>动态调整相似度阈值:</strong> <span id="newThresholdValue">{{ "%.2f"|format(results.config.similarity_threshold) }}</span></label>
+            <input type="range" class="form-range" id="newThresholdSlider" min="0.5" max="0.9" step="0.05" value="{{ results.config.similarity_threshold }}">
+            <div class="text-center mt-3">
+                <button id="btnRecluster" class="btn btn-primary">重新聚类</button>
+                <small class="d-block mt-2 text-muted">提示：调整阈值后点击"重新聚类"按钮，无需重新检测和提取特征</small>
+            </div>
+        </div>
+
+        <!-- 工具栏 -->
+        <div class="text-center mb-4">
+            <a href="/" class="btn btn-secondary">返回主页</a>
+            <button class="btn btn-info" onclick="location.reload()">刷新结果</button>
+        </div>
+
+        <!-- 分组列表 -->
+        <div id="groupsContainer">
+            {% for group in results.groups %}
+            <div class="group-card">
+                <div class="group-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div class="d-flex align-items-center">
+                            <input type="checkbox" class="form-check-input group-checkbox me-3"
+                                   value="{{ group.group_id }}"
+                                   data-person-ids='{{ group.persons|map(attribute="person_id")|list|tojson|safe }}'>
+                            <h5 class="mb-0">
+                                {% if group.group_name %}
+                                    <span class="text-primary fw-bold">{{ group.group_name }}</span>
+                                    <span class="text-muted ms-2">(Group {{ group.group_id + 1 }})</span>
+                                {% else %}
+                                    Group {{ group.group_id + 1 }}
+                                {% endif %}
+                                <span class="badge bg-primary ms-2">{{ group.person_count }} 人</span>
+                                <span class="badge bg-success ms-1 badge-sim">相似度: {{ "%.3f"|format(group.avg_similarity) }}</span>
+                            </h5>
+                        </div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary me-2"
+                                    onclick="renameGroup({{ group.persons[0].person_id if group.persons else 0 }}, '{{ group.group_name }}')">
+                                <i class="bi bi-pencil"></i> 命名
+                            </button>
+                            <a href="/group/{{ group.group_id }}" class="btn btn-sm btn-outline-primary">查看详情</a>
+                        </div>
+                    </div>
+                </div>
+                <div class="group-body">
+                    <div class="d-flex flex-wrap">
+                        {% for person in group.persons %}
+                        <div class="text-center position-relative" title="来自: {{ person.image_id }}" style="margin: 5px;">
+                            <input type="checkbox" class="form-check-input person-checkbox position-absolute"
+                                   value="{{ person.person_id }}"
+                                   style="top: 5px; left: 5px; z-index: 10; cursor: pointer;">
+                            <img src="/images/cropped/{{ person.crop_path.split('\\')[-1] }}"
+                                 class="person-thumbnail"
+                                 alt="Person {{ person.person_id }}"
+                                 onclick="showImageModal('{{ person.crop_path.split('\\')[-1] }}', '{{ person.image_id }}')">
+                            <small class="d-block text-muted">{{ person.image_id[:15] }}</small>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        {% if results.total_groups == 0 %}
+        <div class="alert alert-warning text-center">
+            没有找到匹配的人员组
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- 合并工具栏 -->
+    <div id="mergeBar" class="position-fixed bottom-0 start-50 translate-middle-x mb-4 p-3 bg-white shadow rounded"
+         style="display: none; z-index: 1000; border: 2px solid #0d6efd;">
+        <div class="d-flex align-items-center">
+            <span class="me-3 fw-bold">已选择 <span id="selectedCount" class="text-primary">0</span> 个分组</span>
+            <button class="btn btn-primary me-2" onclick="mergeSelectedGroups()">
+                <i class="bi bi-union"></i> 合并选中组
+            </button>
+            <button class="btn btn-outline-secondary" onclick="clearSelection()">取消选择</button>
+        </div>
+    </div>
+
+    <!-- 图片查看模态框 -->
+    <div class="modal fade" id="imageModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="imageModalLabel">人员图像</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <img id="modalImage" src="" class="img-fluid" alt="Person Image">
+                    <p id="modalImageInfo" class="mt-3 text-muted"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/jquery.min.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            // 阈值滑块
+            $('#newThresholdSlider').on('input', function() {
+                $('#newThresholdValue').text(parseFloat($(this).val()).toFixed(2));
+            });
+
+            // 重新聚类
+            $('#btnRecluster').click(function() {
+                const newThreshold = parseFloat($('#newThresholdSlider').val());
+                const btn = $(this);
+                btn.prop('disabled', true).text('处理中...');
+                $.ajax({
+                    url: '/api/recluster',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ threshold: newThreshold }),
+                    success: function(response) {
+                        alert('重新聚类完成！页面将刷新以显示新结果。');
+                        location.reload();
+                    },
+                    error: function(xhr) {
+                        const error = xhr.responseJSON ? xhr.responseJSON.message : '重新聚类失败';
+                        alert('错误: ' + error);
+                        btn.prop('disabled', false).text('重新聚类');
+                    }
+                });
+            });
+
+            // 显示图片模态框
+            window.showImageModal = function(filename, imageId) {
+                $('#modalImage').attr('src', '/images/cropped/' + filename);
+                $('#modalImageInfo').text('来源图片: ' + imageId);
+                $('#imageModalLabel').text('人员图像 - ' + filename);
+                const modal = new bootstrap.Modal(document.getElementById('imageModal'));
+                modal.show();
+            };
+
+            // 命名功能
+            window.renameGroup = function(personId, currentName) {
+                const newName = prompt("请输入人员姓名:", currentName || "");
+                if (newName !== null && newName.trim() !== "" && newName !== currentName) {
+                    $.ajax({
+                        url: '/api/set_name',
+                        method: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({ person_id: personId, name: newName.trim() }),
+                        success: function(res) {
+                            if (res.success) {
+                                alert('命名成功！页面即将刷新...');
+                                setTimeout(function() { window.location.reload(true); }, 500);
+                            } else {
+                                alert('命名失败: ' + res.message);
+                            }
+                        },
+                        error: function(xhr) {
+                            const error = xhr.responseJSON ? xhr.responseJSON.message : '命名失败';
+                            alert('错误: ' + error);
+                        }
+                    });
+                }
+            };
+
+            // 更新合并工具栏
+            function updateMergeBar() {
+                const groupChecked = $('.group-checkbox:checked').length;
+                const personChecked = $('.person-checkbox:checked').length;
+                const totalChecked = groupChecked + personChecked;
+                if (personChecked >= 1 || totalChecked >= 2) {
+                    let displayText = totalChecked;
+                    if (personChecked > 0 && groupChecked === 0) {
+                        displayText = personChecked + ' 张图片';
+                    } else if (groupChecked > 0 && personChecked === 0) {
+                        displayText = groupChecked + ' 个分组';
+                    } else {
+                        displayText = totalChecked + ' 项';
+                    }
+                    $('#selectedCount').text(displayText);
+                    $('#mergeBar').show();
+                } else {
+                    $('#mergeBar').hide();
+                }
+            }
+
+            // 监听复选框变化
+            $(document).on('change', '.group-checkbox, .person-checkbox', updateMergeBar);
+
+            // 清除选择
+            window.clearSelection = function() {
+                $('.group-checkbox, .person-checkbox').prop('checked', false);
+                updateMergeBar();
+            };
+
+            // 合并选中的分组/图片
+            window.mergeSelectedGroups = function() {
+                let allPersonIds = [];
+                $('.group-checkbox:checked').each(function() {
+                    try {
+                        const pids = $(this).data('person-ids');
+                        if (Array.isArray(pids)) {
+                            allPersonIds = allPersonIds.concat(pids);
+                        }
+                    } catch (e) {
+                        console.error('解析分组person_ids失败:', e);
+                    }
+                });
+                $('.person-checkbox:checked').each(function() {
+                    const pid = parseInt($(this).val());
+                    if (!isNaN(pid) && !allPersonIds.includes(pid)) {
+                        allPersonIds.push(pid);
+                    }
+                });
+                allPersonIds = [...new Set(allPersonIds)];
+                if (allPersonIds.length < 2) {
+                    alert('请至少选择2张图片进行合并\n（当前选中: ' + allPersonIds.length + ' 张）');
+                    return;
+                }
+                if (confirm(`确定要合并吗？\n总计图片数: ${allPersonIds.length}`)) {
+                    $.ajax({
+                        url: '/api/merge',
+                        method: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({
+                            person_ids: allPersonIds,
+                            operator: 'web_user',
+                            note: '前端勾选合并'
+                        }),
+                        success: function(res) {
+                            if (res.success) {
+                                alert('合并成功！页面将刷新。');
+                                setTimeout(function() { window.location.reload(true); }, 500);
+                            } else {
+                                alert('合并失败: ' + res.message);
+                            }
+                        },
+                        error: function(xhr) {
+                            const error = xhr.responseJSON ? xhr.responseJSON.message : '合并失败';
+                            alert('错误: ' + error);
+                        }
+                    });
+                }
+            };
+        });
+    </script>
+</body>
+</html>
+

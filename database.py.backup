@@ -1,0 +1,696 @@
+"""
+数据库操作模块
+"""
+import pymysql
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+from loguru import logger
+import config
+import requests
+
+
+class Database:
+    """数据库操作类"""
+    
+    def __init__(self):
+        self.config = config.DATABASE_CONFIG
+        self.connection = None
+    
+    def connect(self):
+        """连接数据库"""
+        try:
+            self.connection = pymysql.connect(
+                host=self.config['host'],
+                port=self.config['port'],
+                user=self.config['user'],
+                password=self.config['password'],
+                database=self.config['database'],
+                charset=self.config['charset'],
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=True
+            )
+            logger.info("数据库连接成功")
+            return True
+        except Exception as e:
+            logger.error(f"数据库连接失败: {e}")
+            return False
+    
+    def close(self):
+        """关闭数据库连接"""
+        if self.connection:
+            self.connection.close()
+            logger.info("数据库连接已关闭")
+    
+    def _fetch_cameras_from_api(self) -> List[Dict[str, Any]]:
+        """
+        调用配置的接口获取摄像头列表（代替直接查询 app_roomip 表）
+        
+        Returns:
+            摄像头配置列表（接口 data 字段的内容），失败返回空列表
+        """
+        api_url = config.RTSP_MONITOR_CONFIG.get('camera_api_url')
+        verify_ssl = config.RTSP_MONITOR_CONFIG.get('camera_api_verify_ssl', False)
+        timeout = config.RTSP_MONITOR_CONFIG.get('camera_api_timeout', 5)
+
+        if not api_url:
+            logger.error("摄像头配置接口地址未配置 (RTSP_MONITOR_CONFIG.camera_api_url)")
+            return []
+
+        try:
+            logger.info(f"调用摄像头配置接口: {api_url}")
+            resp = requests.post(api_url, json={}, timeout=timeout, verify=verify_ssl)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, dict):
+                logger.error(f"摄像头配置接口返回格式异常（非JSON对象）: {data}")
+                return []
+
+            if data.get('code') != 0:
+                logger.error(f"摄像头配置接口返回错误: code={data.get('code')}, msg={data.get('msg')}")
+                return []
+
+            cameras = data.get('data') or []
+            if not isinstance(cameras, list):
+                logger.error(f"摄像头配置接口 data 字段格式异常: {type(cameras)}")
+                return []
+
+            logger.info(f"接口返回 {len(cameras)} 个摄像头配置")
+            return cameras
+        except requests.exceptions.RequestException as e:
+            logger.error(f"调用摄像头配置接口失败: {e}")
+            return []
+        except ValueError as e:
+            logger.error(f"解析摄像头配置接口返回JSON失败: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"获取摄像头配置时发生未知错误: {e}", exc_info=True)
+            return []
+
+    def get_all_cameras(self) -> List[Dict[str, Any]]:
+        """
+        获取所有有效的摄像头配置（通过接口获取 + USB摄像头）
+
+        Returns:
+            摄像头配置列表
+        """
+        cameras = self._fetch_cameras_from_api()
+
+        # 如果启用了USB摄像头，添加到摄像头列表
+        if config.RTSP_MONITOR_CONFIG.get('enable_usb_camera', False):
+            usb_camera = {
+                'id': -1,  # 使用-1作为USB摄像头的ID
+                'fjmc': config.RTSP_MONITOR_CONFIG.get('usb_camera_name', 'USB摄像头'),
+                'gnslx': config.RTSP_MONITOR_CONFIG.get('usb_camera_area', 'USB监控区域'),
+                'rtspssl': f"usb:{config.RTSP_MONITOR_CONFIG.get('usb_camera_id', 0)}",  # 使用特殊格式标记USB摄像头
+                'ip': 'localhost',
+                'dk': 0,
+                'tdh': 0,
+                'xh': '',
+                'zh': '',
+                'mm': '',
+                'sblx': 'USB',
+            }
+            cameras.append(usb_camera)
+            logger.info(f"已添加USB摄像头到监控列表: {usb_camera['fjmc']} (设备ID: {config.RTSP_MONITOR_CONFIG.get('usb_camera_id', 0)})")
+
+        return cameras
+    
+    def get_camera_by_id(self, camera_id: int) -> Optional[Dict[str, Any]]:
+        """
+        根据ID查询摄像头配置（包括USB摄像头）
+
+        Args:
+            camera_id: 摄像头ID（-1表示USB摄像头）
+
+        Returns:
+            摄像头配置字典，不存在返回None
+        """
+        # 如果是USB摄像头ID
+        if camera_id == -1 and config.RTSP_MONITOR_CONFIG.get('enable_usb_camera', False):
+            return {
+                'id': -1,
+                'fjmc': config.RTSP_MONITOR_CONFIG.get('usb_camera_name', 'USB摄像头'),
+                'gnslx': config.RTSP_MONITOR_CONFIG.get('usb_camera_area', 'USB监控区域'),
+                'rtspssl': f"usb:{config.RTSP_MONITOR_CONFIG.get('usb_camera_id', 0)}",
+                'ip': 'localhost',
+                'dk': 0,
+                'tdh': 0,
+                'xh': '',
+                'zh': '',
+                'mm': '',
+                'sblx': 'USB',
+            }
+
+        # 通过接口获取所有摄像头，再按ID过滤
+        try:
+            cameras = self._fetch_cameras_from_api()
+            for cam in cameras:
+                if cam.get('id') == camera_id:
+                    return cam
+            logger.warning(f"接口返回的摄像头列表中未找到ID={camera_id}的记录")
+            return None
+        except Exception as e:
+            logger.error(f"通过接口查询摄像头配置失败 (ID: {camera_id}): {e}", exc_info=True)
+            return None
+    
+    def _check_connection(self) -> bool:
+        """
+        检查数据库连接是否有效
+        
+        Returns:
+            连接有效返回True，无效返回False
+        """
+        if self.connection is None:
+            return False
+        try:
+            self.connection.ping(reconnect=False)
+            return True
+        except Exception as e:
+            logger.warning(f"数据库连接检查失败: {e}")
+            return False
+    
+    def _reconnect(self) -> bool:
+        """
+        重新连接数据库
+        
+        Returns:
+            重连成功返回True，失败返回False
+        """
+        try:
+            if self.connection:
+                try:
+                    self.connection.close()
+                except:
+                    pass
+            return self.connect()
+        except Exception as e:
+            logger.error(f"数据库重连失败: {e}")
+            return False
+
+    # ==================== 人员相关查询 ====================
+
+    def get_all_person(self) -> List[Dict[str, Any]]:
+        """
+        查询所有有效的人员信息（app_person）
+        
+        Returns:
+            人员列表（包含id, empno, empname, empsex, emp_dept, isdel, idno, phone）
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error("查询人员信息失败: 数据库连接失败")
+                return []
+        try:
+            with self.connection.cursor() as cursor:
+                sql = """
+                    SELECT id, empno, empname, empsex, emp_dept, isdel, idno, phone
+                    FROM app_person
+                    WHERE isdel = '0' OR isdel IS NULL
+                """
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+                logger.info(f"查询到 {len(rows)} 条人员信息 (app_person)")
+                return rows
+        except Exception as e:
+            logger.error(f"查询人员信息失败: {e}")
+            return []
+
+    def is_valid_emp_name(self, name: str) -> bool:
+        """
+        检查给定姓名是否存在于 app_person 表中（限制ReID命名只能选管理员）
+        """
+        if not name:
+            return False
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error("验证人员姓名失败: 数据库连接失败")
+                return False
+        try:
+            with self.connection.cursor() as cursor:
+                sql = """
+                    SELECT 1
+                    FROM app_person
+                    WHERE (isdel = '0' OR isdel IS NULL)
+                      AND empname = %s
+                    LIMIT 1
+                """
+                cursor.execute(sql, (name,))
+                row = cursor.fetchone()
+                return row is not None
+        except Exception as e:
+            logger.error(f"验证人员姓名失败: {e}")
+            return False
+    
+    def save_detection_record(
+        self,
+        pssj: datetime,
+        pstp: str,
+        qyid: int,
+        qymc: str,
+        sxtmx: str,
+        rysl: Optional[int] = None,
+    ) -> Optional[int]:
+        """
+        保存监测记录
+
+        Args:
+            pssj: 拍摄时间
+            pstp: 拍摄图片（文件路径或Base64编码）
+            qyid: 区域ID（摄像头ID）
+            qymc: 区域名称（对应 app_roomip 表的 gnslx 字段）
+            sxtmx: 摄像头名称（对应 app_roomip 表的 fjmc 字段）
+            rysl: 人数（YOLO检测到的人员数量），如果为None则插入NULL
+
+        Returns:
+            保存成功返回记录ID，失败返回None
+        """
+        # 检查连接状态，如果断开则尝试重连
+        if not self._check_connection():
+            logger.warning("数据库连接已断开，尝试重连...")
+            if not self._reconnect():
+                logger.error(f"保存监测记录失败 - 摄像头: {sxtmx} (ID: {qyid}): 数据库连接失败")
+                return None
+
+        # SQL语句定义在外部，以便在重试时使用
+        # 修改：初次保存时jssj设置为pssj，后续如果有合并会更新jssj
+        # 这样确保视频截取时始终有有效的时间范围
+        sql = """
+            INSERT INTO app_track (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+
+        try:
+            with self.connection.cursor() as cursor:
+                # 使用数据库自增ID，不指定id字段（autocommit=True会自动提交）
+                # jssj设置为pssj+5秒，为视频截取提供合理的时间范围
+                jssj = pssj + timedelta(seconds=5)
+                cursor.execute(sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl))
+                # 获取插入的记录ID
+                record_id = cursor.lastrowid
+                # 由于autocommit=True，不需要手动commit
+                logger.info(f"保存监测记录成功 - 摄像头: {sxtmx} (ID: {qyid}), 区域: {qymc}, 记录ID: {record_id}, 时间: {pssj}")
+
+                # 触发Java系统生成复合事件（异步调用，不影响主流程）
+                try:
+                    self.trigger_event_sync(record_id)
+                except Exception as e:
+                    logger.warning(f"触发复合事件生成失败（不影响轨迹保存）: {e}")
+
+                return record_id
+        except pymysql.Error as e:
+            # pymysql特定错误
+            error_code, error_msg = e.args if e.args else (0, str(e))
+            logger.error(
+                f"保存监测记录失败 - 摄像头: {sxtmx} (ID: {qyid}): "
+                f"pymysql.Error [code: {error_code}, msg: {error_msg}], "
+                f"SQL参数: pssj={pssj}, pstp={pstp[:50] if len(pstp) > 50 else pstp}..., qyid={qyid}, qymc={qymc}, sxtmx={sxtmx}"
+            )
+            # 如果是连接相关错误，尝试重连
+            if error_code in (2006, 2013, 0):  # MySQL server has gone away, Lost connection to MySQL server
+                logger.warning("检测到连接错误，尝试重连数据库...")
+                if self._reconnect():
+                    # 重连成功，尝试再次保存
+                    try:
+                        with self.connection.cursor() as cursor:
+                            jssj = pssj + timedelta(seconds=5)
+                            cursor.execute(sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl))
+                            record_id = cursor.lastrowid
+                            logger.info(f"重连后保存监测记录成功 - 摄像头: {sxtmx} (ID: {qyid}), 区域: {qymc}, 记录ID: {record_id}")
+
+                            # 触发Java系统生成复合事件
+                            try:
+                                self.trigger_event_sync(record_id)
+                            except Exception as e:
+                                logger.warning(f"触发复合事件生成失败（不影响轨迹保存）: {e}")
+
+                            return record_id
+                    except Exception as retry_e:
+                        logger.error(f"重连后保存监测记录仍然失败 - 摄像头: {sxtmx} (ID: {qyid}): {retry_e}")
+            return None
+        except Exception as e:
+            # 其他类型的错误
+            error_type = type(e).__name__
+            error_str = str(e)
+            logger.error(
+                f"保存监测记录失败 - 摄像头: {sxtmx} (ID: {qyid}): "
+                f"{error_type}: {error_str}, "
+                f"SQL参数: pssj={pssj}, pstp={pstp[:50] if len(pstp) > 50 else pstp}..., qyid={qyid}, qymc={qymc}, sxtmx={sxtmx}"
+            )
+            return None
+    
+    def trigger_event_sync(self, record_id: int) -> bool:
+        """
+        触发Java系统为指定轨迹生成复合事件
+
+        Args:
+            record_id: 轨迹记录ID
+
+        Returns:
+            成功返回True，失败返回False
+        """
+        try:
+            import requests
+            import urllib3
+
+            # 禁用SSL警告（本地开发环境使用自签名证书）
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            # Java API接口（从config读取）
+            from config import RTSP_MONITOR_CONFIG
+
+            # 构造URL（使用image_url_prefix的域名和端口）
+            base_url = RTSP_MONITOR_CONFIG['image_url_prefix'].split('/profile/')[0]
+            api_url = f"{base_url}/caseapp/track/syncEventForTrack/{record_id}"
+
+            # 调用Java API
+            response = requests.post(
+                api_url,
+                timeout=5,  # 5秒超时
+                verify=False  # 本地开发禁用SSL验证
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('code') == 0:
+                    logger.debug(f"已触发轨迹ID={record_id}的复合事件生成")
+                    return True
+                else:
+                    logger.warning(f"触发复合事件生成失败 - 轨迹ID={record_id}: {result.get('msg')}")
+                    return False
+            else:
+                logger.warning(f"触发复合事件生成失败 - 轨迹ID={record_id}: HTTP {response.status_code}")
+                return False
+
+        except Exception as e:
+            # 不影响轨迹保存，只记录警告
+            logger.warning(f"触发复合事件生成异常 - 轨迹ID={record_id}: {e}")
+            return False
+
+    def get_last_record_time(self, qyid: int) -> Optional[datetime]:
+        """
+        查询指定摄像头最近一次记录时间
+        
+        Args:
+            qyid: 区域ID（摄像头ID）
+            
+        Returns:
+            最近一次记录时间，无记录返回None
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"查询最近记录时间失败 (摄像头ID: {qyid}): 数据库连接失败")
+                return None
+        try:
+            with self.connection.cursor() as cursor:
+                sql = "SELECT MAX(pssj) as last_time FROM app_track WHERE qyid = %s"
+                cursor.execute(sql, (qyid,))
+                result = cursor.fetchone()
+                if result and result.get('last_time'):
+                    return result['last_time']
+                return None
+        except Exception as e:
+            logger.error(f"查询最近记录时间失败 (摄像头ID: {qyid}): {e}")
+            return None
+    
+    def get_last_record(self, qyid: int) -> Optional[Dict[str, Any]]:
+        """
+        查询指定摄像头最近一次完整记录
+        
+        Args:
+            qyid: 区域ID（摄像头ID）
+            
+        Returns:
+            最近一次记录字典（包含id, pssj, jssj等），无记录返回None
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"查询最近记录失败 (摄像头ID: {qyid}): 数据库连接失败")
+                return None
+        try:
+            with self.connection.cursor() as cursor:
+                sql = """
+                    SELECT id, pssj, jssj, pstp, qyid, qymc 
+                    FROM app_track 
+                    WHERE qyid = %s 
+                    ORDER BY pssj DESC 
+                    LIMIT 1
+                """
+                cursor.execute(sql, (qyid,))
+                result = cursor.fetchone()
+                return result
+        except Exception as e:
+            logger.error(f"查询最近记录失败 (摄像头ID: {qyid}): {e}")
+            return None
+    
+    def update_record_end_time(self, record_id: int, jssj: datetime) -> bool:
+        """
+        更新记录的结束时间
+        
+        Args:
+            record_id: 记录ID
+            jssj: 结束时间
+            
+        Returns:
+            更新成功返回True，失败返回False
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"更新记录结束时间失败 - 记录ID: {record_id}: 数据库连接失败")
+                return False
+        try:
+            with self.connection.cursor() as cursor:
+                sql = "UPDATE app_track SET jssj = %s WHERE id = %s"
+                cursor.execute(sql, (jssj, record_id))
+                logger.info(f"更新记录结束时间成功 - 记录ID: {record_id}, 结束时间: {jssj}")
+                return True
+        except Exception as e:
+            logger.error(f"更新记录结束时间失败 - 记录ID: {record_id}: {e}")
+            return False
+
+    def update_record_people_count_if_higher(self, record_id: int, new_count: int) -> bool:
+        """
+        如果新的人员数量大于当前记录中的 rysl，则更新 rysl
+        
+        Args:
+            record_id: app_track 记录ID
+            new_count: YOLO 检测到的新人数
+        """
+        if new_count is None or new_count <= 0:
+            return False
+
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"更新记录人数失败 - 记录ID: {record_id}: 数据库连接失败")
+                return False
+        try:
+            with self.connection.cursor() as cursor:
+                # 先查出当前人数
+                cursor.execute("SELECT rysl FROM app_track WHERE id = %s", (record_id,))
+                row = cursor.fetchone()
+                current = row.get('rysl') if row else None
+
+                if current is None or current < new_count:
+                    cursor.execute(
+                        "UPDATE app_track SET rysl = %s WHERE id = %s",
+                        (new_count, record_id),
+                    )
+                    logger.info(
+                        f"更新记录人数 - 记录ID: {record_id}, 原人数: {current}, 新人数: {new_count}"
+                    )
+                    return True
+                else:
+                    logger.debug(
+                        f"记录人数无需更新 - 记录ID: {record_id}, 当前人数: {current}, 新人数: {new_count}"
+                    )
+                    return False
+        except Exception as e:
+            logger.error(f"更新记录人数失败 - 记录ID: {record_id}: {e}", exc_info=True)
+            return False
+
+    def update_record_image(self, record_id: int, image_url: str) -> bool:
+        """
+        更新记录的图片URL
+
+        Args:
+            record_id: 记录ID
+            image_url: 新的图片URL
+
+        Returns:
+            更新成功返回True，失败返回False
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"更新记录图片失败 - 记录ID: {record_id}: 数据库连接失败")
+                return False
+        try:
+            with self.connection.cursor() as cursor:
+                sql = "UPDATE app_track SET pstp = %s WHERE id = %s"
+                cursor.execute(sql, (image_url, record_id))
+                logger.info(f"更新记录图片成功 - 记录ID: {record_id}, 图片URL: {image_url}")
+                return True
+        except Exception as e:
+            logger.error(f"更新记录图片失败 - 记录ID: {record_id}: {e}")
+            return False
+
+    def get_last_insert_id(self) -> Optional[int]:
+        """
+        获取最后插入的记录ID
+        
+        Returns:
+            最后插入的记录ID，失败返回None
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                return None
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT LAST_INSERT_ID() as id")
+                result = cursor.fetchone()
+                return result['id'] if result else None
+        except Exception as e:
+            logger.error(f"获取最后插入ID失败: {e}")
+            return None
+    
+    def update_person_name(self, record_id: int, person_name: str) -> bool:
+        """
+        更新记录的人员姓名（ryxm字段），同时更新标注状态（bzzt）和标注时间（bzsj）
+        
+        Args:
+            record_id: 记录ID
+            person_name: 人员姓名
+            
+        Returns:
+            更新成功返回True，失败返回False
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"更新人员姓名失败 - 记录ID: {record_id}: 数据库连接失败")
+                return False
+        try:
+            from datetime import datetime
+            # 标注状态和标注时间，这里的值可以根据业务字典调整
+            label_status = '1'  # 对应字段 bzzt（如需使用代码值，可改为 '1' 等）
+            label_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # 对应字段 bzsj
+
+            with self.connection.cursor() as cursor:
+                # 同时更新人员姓名、标注状态和标注时间
+                sql = """
+                    UPDATE app_track 
+                    SET ryxm = %s,
+                        bzzt = %s,
+                        bzsj = %s
+                    WHERE id = %s
+                """
+                cursor.execute(sql, (person_name, label_status, label_time, record_id))
+                logger.info(
+                    f"更新人员姓名成功 - 记录ID: {record_id}, 姓名: {person_name}, "
+                    f"标注状态: {label_status}, 标注时间: {label_time}"
+                )
+                return True
+        except Exception as e:
+            logger.error(f"更新人员姓名失败 - 记录ID: {record_id}: {e}")
+            return False
+    
+    def get_all_records(self, limit: Optional[int] = None, offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        查询所有监测记录
+        
+        Args:
+            limit: 限制返回的记录数，None表示不限制
+            offset: 偏移量，用于分页
+            
+        Returns:
+            记录列表
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error("查询监测记录失败: 数据库连接失败")
+                return []
+        try:
+            with self.connection.cursor() as cursor:
+                if limit:
+                    sql = """
+                        SELECT id, pssj, jssj, pstp, qyid, qymc, sxtmx, ryxm 
+                        FROM app_track 
+                        ORDER BY pssj DESC 
+                        LIMIT %s OFFSET %s
+                    """
+                    cursor.execute(sql, (limit, offset))
+                else:
+                    sql = """
+                        SELECT id, pssj, jssj, pstp, qyid, qymc, sxtmx, ryxm 
+                        FROM app_track 
+                        ORDER BY pssj DESC
+                    """
+                    cursor.execute(sql)
+                records = cursor.fetchall()
+                logger.info(f"查询到 {len(records)} 条监测记录")
+                return records
+        except Exception as e:
+            logger.error(f"查询监测记录失败: {e}")
+            return []
+    
+    def get_records_without_name(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        查询有图片但人员姓名为空的记录
+        
+        Args:
+            limit: 限制返回的记录数，None表示不限制
+            
+        Returns:
+            记录列表
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error("查询未命名记录失败: 数据库连接失败")
+                return []
+        try:
+            with self.connection.cursor() as cursor:
+                sql = """
+                    SELECT id, pssj, jssj, pstp, qyid, qymc, sxtmx, ryxm 
+                    FROM app_track 
+                    WHERE pstp IS NOT NULL AND pstp != '' 
+                    AND (ryxm IS NULL OR ryxm = '')
+                    ORDER BY pssj DESC
+                """
+                if limit:
+                    sql += " LIMIT %s"
+                    cursor.execute(sql, (limit,))
+                else:
+                    cursor.execute(sql)
+                records = cursor.fetchall()
+                logger.info(f"查询到 {len(records)} 条未命名记录")
+                return records
+        except Exception as e:
+            logger.error(f"查询未命名记录失败: {e}")
+            return []
+    
+    def get_record_by_id(self, record_id: int) -> Optional[Dict[str, Any]]:
+        """
+        根据ID查询单条记录
+        
+        Args:
+            record_id: 记录ID
+            
+        Returns:
+            记录字典，不存在返回None
+        """
+        if not self._check_connection():
+            if not self._reconnect():
+                logger.error(f"查询记录失败 (ID: {record_id}): 数据库连接失败")
+                return None
+        try:
+            with self.connection.cursor() as cursor:
+                sql = """
+                    SELECT id, pssj, jssj, pstp, qyid, qymc, sxtmx, ryxm 
+                    FROM app_track 
+                    WHERE id = %s
+                """
+                cursor.execute(sql, (record_id,))
+                result = cursor.fetchone()
+                return result
+        except Exception as e:
+            logger.error(f"查询记录失败 (ID: {record_id}): {e}")
+            return None
+

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>分组详情 - Group {{ group.group_id + 1 }}</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 20px; background-color: #f5f5f5; }
+        .person-card { margin-bottom: 20px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background: white; }
+        .person-image { width: 100%; max-width: 300px; height: auto; }
+        .info-row { padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+        .info-label { font-weight: bold; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">Group {{ group.group_id + 1 }} 详情</h1>
+
+        <div class="alert alert-info">
+            <strong>组信息:</strong> 共 {{ group.person_count }} 人 |
+            平均相似度: {{ "%.3f"|format(group.avg_similarity) }}
+        </div>
+
+        <div class="mb-3">
+            <a href="/results" class="btn btn-secondary">返回结果页</a>
+        </div>
+
+        <div class="row">
+            {% for person in group.persons %}
+            <div class="col-md-6 col-lg-4">
+                <div class="person-card">
+                    <div class="text-center p-3">
+                        <img src="/images/cropped/{{ person.crop_path.split('\\')[-1] }}"
+                             class="person-image"
+                             alt="Person {{ person.person_id }}">
+                    </div>
+                    <div class="p-3">
+                        <div class="info-row">
+                            <span class="info-label">Person ID:</span> {{ person.person_id }}
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">来源图片:</span> {{ person.image_id }}
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">检测置信度:</span> {{ "%.3f"|format(person.confidence) }}
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">边界框:</span> [{{ "%.0f"|format(person.bbox[0]) }}, {{ "%.0f"|format(person.bbox[1]) }}, {{ "%.0f"|format(person.bbox[2]) }}, {{ "%.0f"|format(person.bbox[3]) }}]
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+

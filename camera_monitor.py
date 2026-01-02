@@ -889,9 +889,7 @@ class CameraMonitor:
                     )
                     self.use_pyav = False
                 else:
-                    logger.info(
-                        f"PyAV初始化成功，将使用PTS精确时间戳 - 摄像头: {self.camera_name}"
-                    )
+                    logger.info(f"PyAV初始化成功 - 摄像头: {self.camera_name}")
                     # 关闭OpenCV连接，改用PyAV
                     if self.cap is not None:
                         try:
@@ -1104,21 +1102,15 @@ class CameraMonitor:
                     self.pts_base_offset = float(frame.pts * self.time_base)
                     self.pts_base_time = datetime.now()
 
-                    logger.info(
-                        f"✓ PTS时间基准已建立 - 摄像头: {self.camera_name}, "
-                        f"基准PTS: {self.pts_base_offset:.3f}秒, "
-                        f"基准时间: {self.pts_base_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
-                    )
+                    logger.debug(f"PTS时间基准已建立 - {self.camera_name}")
 
-                    # ==================== 时间校准 ====================
-                    # 自动计算时间偏移量，修正RTSP流延迟
-                    if self.time_offset_seconds is None:  # 只在首次初始化时校准
-                        self.time_offset_seconds = self._auto_calibrate_time_offset()
-
-                        if self.time_offset_seconds != 0:
-                            logger.info(
-                                f"✓ 时间偏移校准完成 - 摄像头: {self.camera_name}, "
-                                f"偏移量: {self.time_offset_seconds:.2f}秒, "
+                    # 时间校准已简化（直接使用系统时间）
+                    if self.time_offset_seconds is None:
+                        self.time_offset_seconds = 0  # 不再需要复杂校准
+                        if False:  # 禁用旧的时间校准逻辑
+                            logger.debug(
+                                f"时间校准已跳过 - 摄像头: {self.camera_name}, "
+                                f"直接使用系统时间, "
                                 f"校准方法: {self.time_calibration_method}"
                             )
                         else:
@@ -1132,9 +1124,9 @@ class CameraMonitor:
 
                     return True
                 else:
-                    logger.warning(f"第一帧PTS为空，尝试下一帧: {self.camera_name}")
+                    logger.debug(f"第一帧PTS为空，尝试下一帧: {self.camera_name}")
 
-            logger.error(f"无法获取有效的PTS时间戳: {self.camera_name}")
+            logger.debug(f"无法获取有效的PTS时间戳，使用系统时间: {self.camera_name}")
             self._release_pyav()
             return False
 

@@ -1391,8 +1391,17 @@ class CameraMonitor:
         try:
             from pathlib import Path
 
+            # 0. 首先确定准确的检测时间（用于文件名和数据库）
+            current_time = detection_time if detection_time is not None else datetime.now()
+
             # 1. 保存图片（返回相对路径，如：20251212/29_摄像头名称_20251212144441.jpg）
-            image_relative_path = self.storage.save_image(frame, self.camera_id, self.camera_name)
+            # ✅ 传递准确的拍摄时间，确保文件名时间戳正确
+            image_relative_path = self.storage.save_image(
+                frame,
+                self.camera_id,
+                self.camera_name,
+                capture_time=current_time  # ← 关键修复！
+            )
 
             if image_relative_path is None:
                 logger.warning(f"保存图片失败，跳过记录 - 摄像头: {self.camera_name}")
@@ -1469,8 +1478,7 @@ class CameraMonitor:
             # 3. 将相对路径转换为完整的URL路径
             image_url = self.storage.get_image_url(image_relative_path)
 
-            # 4. 使用传入的检测时间，如果没有则使用当前时间
-            current_time = detection_time if detection_time is not None else datetime.now()
+            # 4. current_time 已在函数开头计算（line 1395），这里直接使用
 
             # ==================== 时间诊断日志 ====================
             if self.enable_time_diagnosis:

@@ -1,0 +1,1096 @@
+"""
+ReID Pipeline - 完整的人员重识别流程编排
+"""
+import logging
+import time
+from typing import List, Dict, Union
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+from tqdm import tqdm
+import cv2
+from utils.image_processor import load_image
+
+# 从reid_config导入Config，避免与bjjcspbj的config模块冲突
+from reid_config import Config
+from core.detector import PersonDetector
+from core.feature_extractor import ReIDFeatureExtractor
+from core.similarity import SimilarityCalculator
+from core.clustering import GraphClustering
+from core.manual_confirmation import ManualConfirmationManager
+from core.db_confirmation_manager import DatabaseConfirmationManager
+from core.anchor_manager import AnchorManager
+from core.pending_queue import PendingQueue
+from utils.file_handler import scan_images, save_json, load_json, ensure_dir
+from utils.device_manager import print_device_info
+# 从reid_database_modu导入DatabaseManager，避免与bjjcspbj的database模块冲突
+from reid_database_modu.database_manager import DatabaseManager
+
+logger = logging.getLogger(__name__)
+
+
+class ReIDPipeline:
+    """
+    ReID完整流程编排类
+    执行从图片输入到人员分组的全部步骤
+    """
+
+    def __init__(self, config: Config = None):
+        """
+        初始化Pipeline
+
+        Args:
+            config: 配置对象
+        """
+        self.config = config or Config()
+
+        # 确保目录存在
+        self.config.ensure_dirs()
+
+        # 初始化各个模块
+        logger.info("初始化ReID Pipeline...")
+
+        self.detector = PersonDetector(
+            conf_threshold=self.config.DETECTION_CONF_THRESHOLD,
+            iou_threshold=self.config.DETECTION_IOU_THRESHOLD
+        )
+
+        self.extractor = ReIDFeatureExtractor(
+            model_name=self.config.REID_MODEL_NAME,
+            pretrained=self.config.REID_PRETRAINED
+        )
+
+        self.similarity_calculator = SimilarityCalculator(
+            metric=self.config.SIMILARITY_METRIC
+        )
+
+        self.clustering = GraphClustering(
+            similarity_threshold=self.config.SIMILARITY_THRESHOLD
+        )
+
+        # 人工确认管理器（根据配置选择数据库或JSON）
+        if self.config.USE_DATABASE:
+            logger.info("使用数据库存储")
+            self.confirmation_manager = DatabaseConfirmationManager()
+            self.db_manager = DatabaseManager()  # 数据库管理器
+        else:
+            logger.info("使用JSON文件存储")
+            self.confirmation_manager = ManualConfirmationManager(
+                confirmation_file=self.config.MANUAL_CONFIRMATION_FILE
+            )
+            self.db_manager = None
+
+        # 锚点管理器
+        self.anchor_manager = AnchorManager(
+            anchor_file=self.config.ANCHOR_FILE
+        )
+
+        # 待确认队列
+        self.pending_queue = PendingQueue(
+            queue_file=self.config.PENDING_QUEUE_FILE
+        )
+
+        # 运行状态
+        self.metadata = []
+        self.features = None
+        self.similarity_matrix = None
+        self.clusters = None
+
+        logger.info("ReID Pipeline初始化完成")
+
+    def run(
+        self,
+        image_dir: Union[str, Path] = None,
+        output_dir: Union[str, Path] = None
+    ) -> Dict:
+        """
+        执行完整的ReID流程
+
+        Args:
+            image_dir: 输入图片目录
+            output_dir: 输出目录
+
+        Returns:
+            Dict: 处理结果
+        """
+        image_dir = Path(image_dir or self.config.INPUT_IMAGE_DIR)
+        output_dir = Path(output_dir or self.config.RESULTS_DIR)
+
+        logger.info("=" * 70)
+        logger.info("开始ReID处理流程")
+        logger.info(f"输入目录: {image_dir}")
+        logger.info(f"输出目录: {output_dir}")
+        logger.info("=" * 70)
+
+        # 打印设备信息
+        print_device_info()
+
+        start_time = time.time()
+
+        # 步骤1: 扫描图片
+        logger.info("\n[步骤1/7] 扫描图片目录...")
+        image_paths = self._scan_images(image_dir)
+
+        # 步骤2: 人员检测
+        logger.info("\n[步骤2/7] 人员检测...")
+        detection_results = self._detect_persons(image_paths)
+
+        # 步骤3: 裁剪人像
+        logger.info("\n[步骤3/7] 裁剪人像区域...")
+        self.metadata = self._crop_persons(image_paths, detection_results)
+
+        # 步骤4: 特征提取
+        logger.info("\n[步骤4/7] 提取ReID特征...")
+        self.features = self._extract_features()
+
+        # 步骤5: 计算相似度
+        logger.info("\n[步骤5/7] 计算相似度矩阵...")
+        self.similarity_matrix = self._compute_similarity()
+
+        # 步骤6: 人员聚类
+        logger.info("\n[步骤6/7] 人员聚类分组...")
+        self.clusters = self._cluster_persons()
+
+        # 步骤7: 保存结果
+        logger.info("\n[步骤7/7] 保存处理结果...")
+        results = self._save_results(output_dir)
+
+        elapsed_time = time.time() - start_time
+
+        logger.info("=" * 70)
+        logger.info(f"ReID处理完成！总耗时: {elapsed_time:.2f} 秒")
+        logger.info(f"总图片数: {results['total_images']}")
+        logger.info(f"检测人数: {results['total_persons']}")
+        logger.info(f"分组数: {results['total_groups']}")
+        logger.info("=" * 70)
+
+        return results
+
+    def _scan_images(self, image_dir: Path) -> List[Path]:
+        """扫描图片目录"""
+        image_paths = scan_images(
+            image_dir,
+            extensions=self.config.SUPPORTED_IMAGE_FORMATS
+        )
+
+        if len(image_paths) == 0:
+            raise ValueError(f"未在目录中找到图片: {image_dir}")
+
+        logger.info(f"找到 {len(image_paths)} 张图片")
+
+        return image_paths
+
+    def _detect_persons(self, image_paths: List[Path]) -> Dict[str, List[Dict]]:
+        """批量检测人员"""
+        detection_results = self.detector.detect_batch(
+            image_paths,
+            batch_size=self.config.DETECTION_BATCH_SIZE
+        )
+
+        total_detections = sum(len(dets) for dets in detection_results.values())
+        logger.info(f"共检测到 {total_detections} 个人员")
+
+        return detection_results
+
+    def _crop_persons(
+        self,
+        image_paths: List[Path],
+        detection_results: Dict[str, List[Dict]]
+    ) -> List[Dict]:
+        """裁剪人像区域并生成元数据（直接使用已有的检测结果，避免重复检测）"""
+        metadata = []
+        person_id = 0
+
+        for image_path in tqdm(image_paths, desc="裁剪人像"):
+            image_path_str = str(image_path)
+            detections = detection_results.get(image_path_str, [])
+
+            if len(detections) == 0:
+                continue
+
+            # 生成image_id
+            image_id = image_path.stem
+
+            # 读取图片（只读一次，支持中文路径）
+            try:
+                img = load_image(image_path_str)
+            except Exception as e:
+                logger.warning(f"无法读取图片: {image_path_str}, 错误: {e}")
+                continue
+
+            # 确保裁剪目录存在
+            Path(self.config.CROPPED_DIR).mkdir(parents=True, exist_ok=True)
+
+            # 直接使用已有的检测结果进行裁剪（不再重复检测）
+            for person_idx, detection in enumerate(detections):
+                bbox = detection['bbox']
+                conf = detection['conf']
+
+                # 裁剪人像区域
+                x1, y1, x2, y2 = map(int, bbox)
+
+                # 边界检查
+                h, w = img.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+
+                # 检查裁剪区域是否有效
+                if x2 <= x1 or y2 <= y1:
+                    logger.warning(f"无效的裁剪区域: [{x1},{y1},{x2},{y2}]，跳过")
+                    continue
+
+                crop = img[y1:y2, x1:x2]
+
+                # 保存裁剪图片
+                crop_filename = f"{image_id}_person{person_idx}.jpg"
+                crop_path = Path(self.config.CROPPED_DIR) / crop_filename
+                cv2.imwrite(str(crop_path), crop)
+
+                # 构建元数据
+                meta = {
+                    'person_id': person_id,
+                    'image_id': image_id,
+                    'image_path': str(image_path),
+                    'bbox': bbox,
+                    'confidence': conf,
+                    'crop_path': str(crop_path)
+                }
+
+                metadata.append(meta)
+                person_id += 1
+
+        logger.info(f"裁剪完成，共 {len(metadata)} 个人像")
+
+        # 保存元数据
+        metadata_path = Path(self.config.RESULTS_DIR) / "metadata.json"
+        save_json(metadata, metadata_path)
+
+        return metadata
+
+    def _extract_features(self) -> np.ndarray:
+        """批量提取特征"""
+        # 获取所有裁剪图片路径
+        crop_paths = [meta['crop_path'] for meta in self.metadata]
+        
+        # 检查是否有图片需要处理
+        if not crop_paths:
+            logger.warning("没有检测到人像，无法提取特征")
+            # 返回空数组
+            return np.empty((0, 512), dtype=np.float32)
+
+        # 批量提取特征
+        features = self.extractor.extract_batch(
+            crop_paths,
+            batch_size=self.config.FEATURE_BATCH_SIZE
+        )
+        
+        # 检查提取结果
+        if features.shape[0] == 0:
+            logger.warning("特征提取完成，但没有成功提取任何特征")
+        else:
+            logger.info(f"成功提取 {features.shape[0]} 个特征向量，维度: {features.shape[1]}")
+
+        # 保存特征
+        features_path = Path(self.config.FEATURES_DIR) / "features.npy"
+        self.extractor.save_features(features, features_path)
+
+        return features
+
+    def _compute_similarity(self) -> np.ndarray:
+        """计算相似度矩阵并应用同图约束"""
+        # 检查特征是否为空
+        if self.features.shape[0] == 0:
+            logger.warning("特征数组为空，无法计算相似度矩阵，返回空矩阵")
+            # 返回空矩阵
+            return np.empty((0, 0), dtype=np.float32)
+        
+        # 计算相似度矩阵
+        similarity_matrix = self.similarity_calculator.compute_similarity_matrix(
+            self.features
+        )
+
+        # 应用同图约束
+        similarity_matrix = self.similarity_calculator.apply_same_image_constraint(
+            similarity_matrix,
+            self.metadata
+        )
+
+        # 获取统计信息
+        stats = self.similarity_calculator.get_similarity_stats(similarity_matrix)
+        logger.info(f"相似度统计: {stats}")
+
+        # 保存相似度矩阵
+        similarity_path = Path(self.config.RESULTS_DIR) / "similarity_matrix.npy"
+        SimilarityCalculator.save_similarity_matrix(similarity_matrix, str(similarity_path))
+
+        return similarity_matrix
+
+    def _cluster_persons(self) -> List[List[int]]:
+        """聚类分组"""
+        # 检查相似度矩阵是否为空
+        if self.similarity_matrix.shape[0] == 0 or self.similarity_matrix.shape[1] == 0:
+            logger.warning("相似度矩阵为空，无法进行聚类，返回空分组列表")
+            return []
+        
+        # 聚类
+        clusters = self.clustering.cluster(
+            self.similarity_matrix,
+            self.metadata
+        )
+
+        # 优化聚类（确保同图约束）
+        clusters = self.clustering.refine_clusters(clusters, self.metadata)
+
+        # 获取统计信息
+        stats = self.clustering.get_cluster_stats(clusters)
+        logger.info(f"聚类统计: {stats}")
+
+        return clusters
+
+    def _save_results(self, output_dir: Path) -> Dict:
+        """保存处理结果"""
+        ensure_dir(output_dir)
+
+        # 构建分组结果
+        groups = []
+        for group_id, cluster in enumerate(self.clusters):
+            # 计算组内平均相似度
+            if len(cluster) > 1:
+                group_similarities = []
+                for i in range(len(cluster)):
+                    for j in range(i + 1, len(cluster)):
+                        sim = self.similarity_matrix[cluster[i]][cluster[j]]
+                        if sim >= 0:  # 排除同图约束标记
+                            group_similarities.append(sim)
+
+                avg_similarity = float(np.mean(group_similarities)) if group_similarities else 0.0
+            else:
+                avg_similarity = 1.0
+
+            # 获取该组的名称
+            representative_pid = cluster[0] if cluster else 0
+            group_name = self.confirmation_manager.get_name(representative_pid)
+
+            # 构建组信息
+            group_info = {
+                'group_id': group_id,
+                'group_name': group_name,
+                'person_count': len(cluster),
+                'avg_similarity': avg_similarity,
+                'persons': []
+            }
+
+            # 添加人员信息
+            for person_id in cluster:
+                meta = self.metadata[person_id]
+                person_info = {
+                    'person_id': person_id,
+                    'image_id': meta['image_id'],
+                    'image_path': meta['image_path'],
+                    'crop_path': meta['crop_path'],
+                    'bbox': meta['bbox'],
+                    'confidence': meta['confidence']
+                }
+                group_info['persons'].append(person_info)
+
+            groups.append(group_info)
+
+        # 排序：按人数降序
+        groups = sorted(groups, key=lambda x: x['person_count'], reverse=True)
+
+        # 构建完整结果
+        results = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'config': {
+                'similarity_threshold': self.config.SIMILARITY_THRESHOLD,
+                'detection_conf_threshold': self.config.DETECTION_CONF_THRESHOLD,
+                'reid_model': self.config.REID_MODEL_NAME
+            },
+            'total_images': len(set(meta['image_id'] for meta in self.metadata)),
+            'total_persons': len(self.metadata),
+            'total_groups': len(groups),
+            'groups': groups
+        }
+
+        # 保存到JSON文件
+        results_path = output_dir / "reid_results.json"
+        save_json(results, results_path)
+        logger.info(f"结果已保存到JSON: {results_path}")
+
+        # 如果启用数据库，同时保存到数据库
+        if self.config.USE_DATABASE:
+            try:
+                logger.info("保存结果到数据库...")
+
+                # 保存所有人员数据
+                all_persons = []
+                for person_id, meta in enumerate(self.metadata):
+                    person_data = {
+                        'person_id': person_id,
+                        'image_id': meta['image_id'],
+                        'image_path': meta['image_path'],
+                        'crop_path': meta['crop_path'],
+                        'bbox': meta['bbox'],
+                        'confidence': meta['confidence']
+                    }
+                    all_persons.append(person_data)
+
+                self.db_manager.batch_save_persons(all_persons)
+
+                # 保存分组及成员关系
+                for group in groups:
+                    member_person_ids = [p['person_id'] for p in group['persons']]
+
+                    # 为原始分组设置一个标识：使用第一个成员的person_id
+                    # 这样命名时可以通过这个标识找到并更新分组
+                    representative_person_id = member_person_ids[0] if member_person_ids else None
+
+                    group_data = {
+                        'group_id': group['group_id'],
+                        'group_name': group['group_name'],
+                        'person_count': group['person_count'],
+                        'avg_similarity': group['avg_similarity'],
+                        'merged_group': False,
+                        'merged_person_id': representative_person_id  # 添加标识
+                    }
+                    self.db_manager.save_group(group_data, member_person_ids)
+
+                logger.info(f"✓ 结果已保存到数据库: {len(all_persons)}个人员, {len(groups)}个分组")
+            except Exception as e:
+                logger.error(f"保存到数据库失败: {e}", exc_info=True)
+
+        return results
+
+    def recluster(self, new_threshold: float, clear_merges: bool = False) -> Dict:
+        """
+        使用新阈值重新聚类（无需重新检测和提取特征）
+
+        Args:
+            new_threshold: 新的相似度阈值
+            clear_merges: 是否清除所有手动合并（默认False，会智能过滤）
+
+        Returns:
+            Dict: 新的聚类结果
+        """
+        if self.similarity_matrix is None:
+            raise ValueError("请先运行完整流程")
+
+        logger.info(f"使用新阈值重新聚类: {new_threshold}")
+
+        # 如果使用数据库，先清除旧的聚类数据
+        if self.config.USE_DATABASE:
+            try:
+                self.db_manager.clear_clustering_data()
+            except Exception as e:
+                logger.warning(f"清除旧数据时出错: {e}")
+
+        # 智能过滤手动合并：移除低于新阈值的合并
+        if not clear_merges:
+            self._filter_low_similarity_merges(new_threshold)
+        else:
+            # 清除所有手动合并
+            logger.info("清除所有手动合并关系...")
+            self.confirmation_manager.clear_confirmations()
+
+        # 重新聚类
+        self.clusters = self.clustering.recluster(
+            self.similarity_matrix,
+            new_threshold,
+            self.metadata
+        )
+
+        # 保存结果
+        results = self._save_results(Path(self.config.RESULTS_DIR))
+
+        logger.info(f"重新聚类完成，新分组数: {results['total_groups']}")
+
+        return results
+
+    def _filter_low_similarity_merges(self, threshold: float):
+        """
+        智能过滤手动合并：移除相似度低于新阈值的合并
+
+        Args:
+            threshold: 新的相似度阈值
+        """
+        import numpy as np
+
+        merge_mapping = self.confirmation_manager.merge_mapping
+        if not merge_mapping:
+            return
+
+        logger.info(f"检查手动合并关系，过滤相似度 < {threshold} 的合并...")
+
+        to_remove = []
+        for merged_id, person_ids in merge_mapping.items():
+            # 计算该合并组的平均相似度
+            similarities = []
+            for i in range(len(person_ids)):
+                for j in range(i + 1, len(person_ids)):
+                    pid_i = person_ids[i]
+                    pid_j = person_ids[j]
+                    if (pid_i < self.similarity_matrix.shape[0] and
+                        pid_j < self.similarity_matrix.shape[1]):
+                        sim = self.similarity_matrix[pid_i][pid_j]
+                        if sim >= 0:  # 排除同图约束
+                            similarities.append(sim)
+
+            if similarities:
+                avg_sim = float(np.mean(similarities))
+                if avg_sim < threshold:
+                    logger.info(
+                        f"移除低相似度合并: merged_id={merged_id}, "
+                        f"person_ids={person_ids}, avg_similarity={avg_sim:.3f} < {threshold}"
+                    )
+                    to_remove.append(merged_id)
+                else:
+                    logger.info(
+                        f"保留高相似度合并: merged_id={merged_id}, "
+                        f"person_ids={person_ids}, avg_similarity={avg_sim:.3f} >= {threshold}"
+                    )
+
+        # 移除低相似度的合并
+        for merged_id in to_remove:
+            self.confirmation_manager.unmerge_group(
+                merged_person_id=merged_id,
+                operator='system',
+                note=f'重新聚类时自动移除（相似度低于阈值{threshold}）'
+            )
+
+        if to_remove:
+            logger.info(f"共移除了 {len(to_remove)} 个低相似度合并")
+        else:
+            logger.info("所有手动合并的相似度都符合新阈值，全部保留")
+
+    def load_cached_data(self, results_dir: Union[str, Path]):
+        """
+        加载缓存的数据
+
+        Args:
+            results_dir: 结果目录
+        """
+        results_dir = Path(results_dir)
+
+        # 加载元数据
+        metadata_path = results_dir / "metadata.json"
+        if metadata_path.exists():
+            self.metadata = load_json(metadata_path)
+            logger.info(f"已加载元数据: {len(self.metadata)} 个人员")
+
+        # 加载特征
+        features_path = Path(self.config.FEATURES_DIR) / "features.npy"
+        if features_path.exists():
+            self.features = ReIDFeatureExtractor.load_features(features_path)
+
+        # 加载相似度矩阵
+        similarity_path = results_dir / "similarity_matrix.npy"
+        if similarity_path.exists():
+            self.similarity_matrix = SimilarityCalculator.load_similarity_matrix(
+                str(similarity_path)
+            )
+
+        logger.info("缓存数据加载完成")
+
+    def merge_persons(
+        self,
+        person_ids: List[int],
+        operator: str = "system",
+        note: str = ""
+    ) -> int:
+        """
+        手动合并多个人员
+
+        Args:
+            person_ids: 要合并的person_id列表
+            operator: 操作者
+            note: 备注
+
+        Returns:
+            int: 合并后的merged_person_id
+        """
+        merged_id = self.confirmation_manager.merge_groups(
+            person_ids=person_ids,
+            operator=operator,
+            note=note
+        )
+
+        # 保存确认数据
+        self.confirmation_manager.save_confirmations()
+
+        logger.info(f"人员合并完成: {person_ids} -> {merged_id}")
+
+        return merged_id
+
+    def unmerge_persons(
+        self,
+        merged_person_id: int,
+        operator: str = "system",
+        note: str = ""
+    ) -> List[int]:
+        """
+        取消人员合并
+
+        Args:
+            merged_person_id: 要取消的合并ID
+            operator: 操作者
+            note: 备注
+
+        Returns:
+            List[int]: 恢复的原始person_id列表
+        """
+        original_ids = self.confirmation_manager.unmerge_group(
+            merged_person_id=merged_person_id,
+            operator=operator,
+            note=note
+        )
+
+        # 保存确认数据
+        self.confirmation_manager.save_confirmations()
+
+        logger.info(f"取消合并完成: {merged_person_id} -> {original_ids}")
+
+        return original_ids
+
+    def set_person_name(self, person_id: int, name: str) -> int:
+        """
+        设置人员名称
+
+        Args:
+            person_id: 人员ID
+            name: 人员姓名
+
+        Returns:
+            int: 该person_id所属的merged_id
+        """
+        merged_id = self.confirmation_manager.set_name(person_id, name)
+
+        # 保存确认数据
+        self.confirmation_manager.save_confirmations()
+
+        logger.info(f"设置人员名称完成: person_id={person_id}, name={name}, merged_id={merged_id}")
+
+        return merged_id
+
+    def get_person_name(self, person_id: int) -> str:
+        """
+        获取人员名称
+
+        Args:
+            person_id: 人员ID
+
+        Returns:
+            str: 人员姓名
+        """
+        return self.confirmation_manager.get_name(person_id)
+
+    def get_confirmed_results(self) -> Dict:
+        """
+        获取应用人工确认后的结果
+
+        Returns:
+            Dict: 应用人工确认后的结果
+        """
+        # 加载最新的结果
+        results_path = Path(self.config.RESULTS_DIR) / "reid_results.json"
+        if not results_path.exists():
+            raise ValueError("结果文件不存在，请先运行ReID分析")
+
+        results = load_json(results_path)
+
+        # 应用人工确认
+        confirmed_results = self.confirmation_manager.apply_confirmations_to_results(results)
+
+        # 保存确认后的结果
+        confirmed_results_path = Path(self.config.RESULTS_DIR) / "reid_results_confirmed.json"
+        save_json(confirmed_results, confirmed_results_path)
+
+        logger.info(f"确认后结果已保存: {confirmed_results_path}")
+
+        return confirmed_results
+
+    def get_merge_suggestions(
+        self,
+        similarity_threshold: float = None,
+        min_similarity: float = None
+    ) -> List[Dict]:
+        """
+        获取合并建议
+
+        Args:
+            similarity_threshold: 高相似度阈值
+            min_similarity: 最低相似度阈值
+
+        Returns:
+            List[Dict]: 合并建议列表
+        """
+        # 使用配置中的默认值
+        similarity_threshold = similarity_threshold or self.config.MERGE_SUGGESTION_THRESHOLD
+        min_similarity = min_similarity or self.config.MERGE_MIN_SIMILARITY
+
+        # 加载结果
+        results_path = Path(self.config.RESULTS_DIR) / "reid_results.json"
+        if not results_path.exists():
+            raise ValueError("结果文件不存在，请先运行ReID分析")
+
+        results = load_json(results_path)
+
+        # 生成建议
+        suggestions = self.confirmation_manager.get_merge_suggestions(
+            results=results,
+            similarity_threshold=similarity_threshold,
+            min_similarity=min_similarity
+        )
+
+        return suggestions
+
+    def export_confirmation_report(self, filepath: Union[str, Path] = None):
+        """
+        导出人工确认报告
+
+        Args:
+            filepath: 报告保存路径
+        """
+        if filepath is None:
+            filepath = Path(self.config.RESULTS_DIR) / "confirmation_report.json"
+
+        self.confirmation_manager.export_merge_report(filepath)
+
+        logger.info(f"确认报告已导出: {filepath}")
+
+    def clear_confirmations(self):
+        """清除所有人工确认数据"""
+        self.confirmation_manager.clear_confirmations()
+        self.confirmation_manager.save_confirmations()
+        logger.info("已清除所有人工确认数据")
+
+    def get_confirmation_statistics(self) -> Dict:
+        """
+        获取人工确认统计信息
+
+        Returns:
+            Dict: 统计信息
+        """
+        return self.confirmation_manager.get_statistics()
+
+    # ==================== 锚点功能（三阶段工作流程） ====================
+
+    def initialize_anchors_from_confirmations(self):
+        """
+        阶段一：从人工确认中初始化锚点
+        为每个 merged_person_id 创建锚点
+        """
+        logger.info("开始初始化锚点...")
+
+        # 加载特征
+        if self.features is None:
+            features_path = Path(self.config.FEATURES_DIR) / "features.npy"
+            if features_path.exists():
+                from core.feature_extractor import ReIDFeatureExtractor
+                self.features = ReIDFeatureExtractor.load_features(features_path)
+            else:
+                raise ValueError("特征文件不存在，请先运行ReID分析")
+
+        # 加载元数据
+        if not self.metadata:
+            metadata_path = Path(self.config.RESULTS_DIR) / "metadata.json"
+            if metadata_path.exists():
+                self.metadata = load_json(metadata_path)
+            else:
+                raise ValueError("元数据不存在，请先运行ReID分析")
+
+        # 遍历所有合并组
+        anchor_count = 0
+        for merged_id, person_ids in self.confirmation_manager.merge_mapping.items():
+            # 收集这些person的embeddings
+            embeddings = []
+            for pid in person_ids:
+                if pid < len(self.features):
+                    embeddings.append(self.features[pid])
+
+            if len(embeddings) == 0:
+                logger.warning(f"merged_id={merged_id} 没有有效的embedding，跳过")
+                continue
+
+            embeddings = np.array(embeddings)
+
+            # 创建锚点
+            self.anchor_manager.create_anchor(
+                merged_person_id=merged_id,
+                person_ids=person_ids,
+                embeddings=embeddings,
+                is_confirmed=True
+            )
+            anchor_count += 1
+
+        # 保存锚点
+        self.anchor_manager.save_anchors()
+
+        logger.info(f"✓ 锚点初始化完成: 创建了 {anchor_count} 个锚点")
+
+        return anchor_count
+
+    def match_new_persons_to_anchors(
+        self,
+        auto_apply: bool = False
+    ) -> Dict:
+        """
+        阶段二：将新人员匹配到锚点
+        自动匹配或加入待确认队列
+
+        Args:
+            auto_apply: 是否自动应用高置信度匹配
+
+        Returns:
+            Dict: 匹配结果统计
+        """
+        logger.info("开始匹配新人员到锚点...")
+
+        if self.features is None or not self.metadata:
+            raise ValueError("请先运行ReID分析或加载缓存数据")
+
+        # 匹配阈值
+        threshold_high = self.config.ANCHOR_AUTO_MATCH_THRESHOLD
+        threshold_low = self.config.ANCHOR_PENDING_THRESHOLD
+
+        # 批量匹配
+        match_results = self.anchor_manager.batch_match_to_anchors(
+            embeddings=self.features,
+            threshold_high=threshold_high,
+            threshold_low=threshold_low
+        )
+
+        # 统计结果
+        stats = {
+            'auto_matched': 0,
+            'pending_confirm': 0,
+            'unknown': 0,
+            'total': len(match_results)
+        }
+
+        auto_matches = []  # 自动匹配的结果
+
+        for person_id, (matched_anchor_id, similarity, status) in enumerate(match_results):
+            meta = self.metadata[person_id]
+
+            if status == 'auto_matched':
+                stats['auto_matched'] += 1
+                auto_matches.append({
+                    'person_id': person_id,
+                    'anchor_id': matched_anchor_id,
+                    'similarity': similarity
+                })
+
+            elif status == 'pending_confirm':
+                stats['pending_confirm'] += 1
+                # 加入待确认队列
+                self.pending_queue.add_pending_item(
+                    person_id=person_id,
+                    suggested_anchor_id=matched_anchor_id,
+                    similarity=similarity,
+                    image_id=meta['image_id'],
+                    crop_path=meta['crop_path']
+                )
+
+            else:  # unknown
+                stats['unknown'] += 1
+
+        # 保存待确认队列
+        self.pending_queue.save_queue()
+
+        # 如果auto_apply=True，自动应用匹配结果
+        if auto_apply and auto_matches:
+            logger.info(f"自动应用 {len(auto_matches)} 个高置信度匹配")
+            for match in auto_matches:
+                # 将person_id合并到anchor对应的merged_id
+                self._auto_merge_to_anchor(
+                    person_id=match['person_id'],
+                    anchor_id=match['anchor_id']
+                )
+
+        logger.info(
+            f"✓ 匹配完成: 自动匹配={stats['auto_matched']}, "
+            f"待确认={stats['pending_confirm']}, "
+            f"未知={stats['unknown']}"
+        )
+
+        return stats
+
+    def _auto_merge_to_anchor(self, person_id: int, anchor_id: int):
+        """
+        内部方法：将person自动合并到锚点
+
+        Args:
+            person_id: 人员ID
+            anchor_id: 锚点ID
+        """
+        # 检查是否已经在合并映射中
+        existing_merge_id = self.confirmation_manager.get_merged_id(person_id)
+        if existing_merge_id != person_id:
+            logger.warning(f"person_id={person_id} 已经合并到 {existing_merge_id}")
+            return
+
+        # 获取锚点对应的原始person_ids
+        original_ids = self.confirmation_manager.merge_mapping.get(anchor_id, [])
+
+        # 添加新的person_id到映射
+        if anchor_id not in self.confirmation_manager.merge_mapping:
+            self.confirmation_manager.merge_mapping[anchor_id] = []
+
+        if person_id not in self.confirmation_manager.merge_mapping[anchor_id]:
+            self.confirmation_manager.merge_mapping[anchor_id].append(person_id)
+
+            # 更新锚点（添加新样本）
+            if person_id < len(self.features):
+                new_embedding = self.features[person_id:person_id+1]
+                self.anchor_manager.update_anchor(
+                    merged_person_id=anchor_id,
+                    new_person_ids=[person_id],
+                    new_embeddings=new_embedding
+                )
+
+            logger.debug(f"自动合并: person_id={person_id} -> anchor_id={anchor_id}")
+
+    def confirm_pending_person(
+        self,
+        person_id: int,
+        confirmed_anchor_id: int = None,
+        operator: str = "system"
+    ):
+        """
+        确认待确认的人员
+
+        Args:
+            person_id: 待确认的person_id
+            confirmed_anchor_id: 确认的锚点ID（None表示拒绝）
+            operator: 操作者
+        """
+        # 在队列中确认
+        self.pending_queue.confirm_item(
+            person_id=person_id,
+            confirmed_anchor_id=confirmed_anchor_id
+        )
+
+        # 如果确认了，执行合并
+        if confirmed_anchor_id is not None:
+            self._auto_merge_to_anchor(person_id, confirmed_anchor_id)
+
+            # 保存确认数据
+            self.confirmation_manager.save_confirmations()
+            self.anchor_manager.save_anchors()
+
+        # 保存队列
+        self.pending_queue.save_queue()
+
+        logger.info(
+            f"待确认项已处理: person_id={person_id}, "
+            f"anchor_id={confirmed_anchor_id}"
+        )
+
+    def get_pending_items(self, limit: int = 20) -> List[Dict]:
+        """
+        获取待确认项目列表
+
+        Args:
+            limit: 返回数量限制
+
+        Returns:
+            List[Dict]: 待确认项列表
+        """
+        return self.pending_queue.get_pending_items(status='pending', limit=limit)
+
+    def get_anchor_statistics(self) -> Dict:
+        """
+        获取锚点统计信息
+
+        Returns:
+            Dict: 统计信息
+        """
+        anchor_stats = self.anchor_manager.get_anchor_stats()
+        queue_stats = self.pending_queue.get_queue_stats()
+
+        combined_stats = {
+            'anchors': anchor_stats,
+            'pending_queue': queue_stats
+        }
+
+        return combined_stats
+
+    def list_anchors(self) -> List[Dict]:
+        """
+        列出所有锚点
+
+        Returns:
+            List[Dict]: 锚点列表
+        """
+        return self.anchor_manager.list_anchors(confirmed_only=True)
+
+    def create_anchor_from_merge(
+        self,
+        person_ids: List[int],
+        operator: str = "system",
+        note: str = ""
+    ) -> int:
+        """
+        从人工合并直接创建锚点（阶段一专用）
+
+        Args:
+            person_ids: 要合并的person_id列表
+            operator: 操作者
+            note: 备注
+
+        Returns:
+            int: merged_person_id（也是anchor_id）
+        """
+        # 先执行合并
+        merged_id = self.merge_persons(
+            person_ids=person_ids,
+            operator=operator,
+            note=note
+        )
+
+        # 创建锚点
+        embeddings = []
+        for pid in person_ids:
+            if pid < len(self.features):
+                embeddings.append(self.features[pid])
+
+        if embeddings:
+            embeddings = np.array(embeddings)
+            self.anchor_manager.create_anchor(
+                merged_person_id=merged_id,
+                person_ids=person_ids,
+                embeddings=embeddings,
+                is_confirmed=True
+            )
+
+            # 保存锚点
+            self.anchor_manager.save_anchors()
+
+            logger.info(f"✓ 创建锚点: merged_id={merged_id}, 样本数={len(person_ids)}")
+
+        return merged_id
+
+    def export_anchor_report(self, filepath: Union[str, Path] = None):
+        """
+        导出锚点报告
+
+        Args:
+            filepath: 报告保存路径
+        """
+        if filepath is None:
+            filepath = Path(self.config.RESULTS_DIR) / "anchor_report.json"
+
+        filepath = Path(filepath)
+
+        # 收集报告数据
+        report = {
+            'report_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'statistics': self.get_anchor_statistics(),
+            'anchors': self.list_anchors(),
+            'pending_items': self.get_pending_items(limit=100)
+        }
+
+        # 保存报告
+        save_json(report, filepath)
+
+        logger.info(f"锚点报告已导出: {filepath}")

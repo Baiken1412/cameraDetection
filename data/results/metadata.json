@@ -1,0 +1,54 @@
+[
+  {
+    "person_id": 0,
+    "image_id": "123456",
+    "image_path": "D:\\ruoyi\\uploadPath\\sacwspbj\\123456.jpeg",
+    "bbox": [
+      5.665077209472656,
+      64.2730484008789,
+      212.02210998535156,
+      344.1446228027344
+    ],
+    "confidence": 0.9473875761032104,
+    "crop_path": "D:\\CURSOR生成\\20251215\\bjjcspbj\\data\\cropped_persons\\123456_person0.jpg"
+  },
+  {
+    "person_id": 1,
+    "image_id": "oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-au111toq-75_330 (1)",
+    "image_path": "D:\\ruoyi\\uploadPath\\sacwspbj\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-au111toq-75_330 (1).jpeg",
+    "bbox": [
+      5.665077209472656,
+      64.2730484008789,
+      212.02210998535156,
+      344.1446228027344
+    ],
+    "confidence": 0.9473875761032104,
+    "crop_path": "D:\\CURSOR生成\\20251215\\bjjcspbj\\data\\cropped_persons\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-au111toq-75_330 (1)_person0.jpg"
+  },
+  {
+    "person_id": 2,
+    "image_id": "oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-aut11oq-75_330 (1)",
+    "image_path": "D:\\ruoyi\\uploadPath\\sacwspbj\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-aut11oq-75_330 (1).jpeg",
+    "bbox": [
+      5.665077209472656,
+      64.2730484008789,
+      212.02210998535156,
+      344.1446228027344
+    ],
+    "confidence": 0.9473875761032104,
+    "crop_path": "D:\\CURSOR生成\\20251215\\bjjcspbj\\data\\cropped_persons\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-aut11oq-75_330 (1)_person0.jpg"
+  },
+  {
+    "person_id": 3,
+    "image_id": "oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-autoq-75_330",
+    "image_path": "D:\\ruoyi\\uploadPath\\sacwspbj\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-autoq-75_330.jpeg",
+    "bbox": [
+      5.665077209472656,
+      64.2730484008789,
+      212.02210998535156,
+      344.1446228027344
+    ],
+    "confidence": 0.9473875761032104,
+    "crop_path": "D:\\CURSOR生成\\20251215\\bjjcspbj\\data\\cropped_persons\\oUjMOfB9NzmEI1AeUgb4AjDyEtLy07AhbqID0B~tplv-dy-resize-origshort-autoq-75_330_person0.jpg"
+  }
+]

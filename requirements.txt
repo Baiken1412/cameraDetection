@@ -1,0 +1,23 @@
+# RTSP视频流监测系统 - Python依赖包（仅背景建模版本）
+
+# 数据库操作
+pymysql>=1.1.0
+
+# 视频流处理
+opencv-python>=4.8.0
+av>=8.0.0  # PyAV for RTSP with PTS timestamp support
+
+# 图像处理
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 日志
+loguru>=0.7.0
+
+# Web框架（如果需要Web界面）
+Flask>=2.3.0
+
+# 文档处理（用于Markdown转Word）
+python-docx>=1.1.0
+markdown>=3.4.0
+

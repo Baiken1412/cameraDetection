@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>监测记录管理 - ReID系统</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; background-color: #f5f5f5; }
+        .main-container { max-width: 1400px; margin: 0 auto; }
+        .stats-card { margin-bottom: 20px; }
+        .table-container { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn-reidentify { margin-bottom: 20px; }
+        .image-thumbnail { max-width: 150px; max-height: 100px; cursor: pointer; }
+        .image-thumbnail:hover { opacity: 0.8; }
+        .badge-name { font-size: 0.9em; }
+        .table th { background-color: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <h1 class="mb-4">监测记录管理</h1>
+        
+        <!-- 统计信息 -->
+        <div class="row stats-card">
+            <div class="col-md-4">
+                <div class="card text-white bg-primary">
+                    <div class="card-body">
+                        <h5 class="card-title">总记录数</h5>
+                        <h2 class="mb-0">{{ total_count }}</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-white bg-success">
+                    <div class="card-body">
+                        <h5 class="card-title">已识别</h5>
+                        <h2 class="mb-0">{{ with_name_count }}</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-white bg-warning">
+                    <div class="card-body">
+                        <h5 class="card-title">未识别</h5>
+                        <h2 class="mb-0">{{ without_name_count }}</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 操作按钮 -->
+        <div class="btn-reidentify">
+            <button id="btnReidentify" class="btn btn-primary btn-lg">
+                <span id="btnText">重新识别未命名记录</span>
+                <span id="btnSpinner" class="spinner-border spinner-border-sm d-none" role="status" aria-hidden="true"></span>
+            </button>
+            <a href="/" class="btn btn-secondary btn-lg ms-2">返回首页</a>
+        </div>
+        
+        <!-- 数据表格 -->
+        <div class="table-container">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>拍摄时间</th>
+                        <th>区域名称</th>
+                        <th>摄像头名称</th>
+                        <th>人员姓名</th>
+                        <th>图片</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in records %}
+                    <tr>
+                        <td>{{ record.id }}</td>
+                        <td>{{ record.pssj.strftime('%Y-%m-%d %H:%M:%S') if record.pssj else '-' }}</td>
+                        <td>{{ record.qymc or '-' }}</td>
+                        <td>{{ record.sxtmx or '-' }}</td>
+                        <td>
+                            {% if record.ryxm %}
+                                <span class="badge bg-success badge-name">{{ record.ryxm }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary badge-name">未识别</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if record.pstp %}
+                                <img src="{{ record.pstp }}" alt="图片" class="image-thumbnail" 
+                                     onclick="showImageModal('{{ record.pstp }}')">
+                            {% else %}
+                                <span class="text-muted">无图片</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            
+            {% if not records %}
+            <div class="alert alert-info text-center">
+                暂无记录
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- 图片预览模态框 -->
+    <div class="modal fade" id="imageModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">图片预览</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <img id="modalImage" src="" alt="预览" class="img-fluid">
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/jquery.min.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script>
+        console.log('[Records] 脚本开始执行');
+        
+        // 使用原生 JavaScript，不依赖 jQuery
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('[Records] DOM 加载完成');
+            
+            let processing = false;
+            const btnReidentify = document.getElementById('btnReidentify');
+            
+            if (!btnReidentify) {
+                console.error('[Records] 错误：重新识别按钮不存在！');
+                alert('错误：重新识别按钮未找到');
+                return;
+            }
+            
+            console.log('[Records] 重新识别按钮已找到，ID:', btnReidentify.id);
+            
+            // 绑定点击事件
+            btnReidentify.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('[Records] 按钮被点击！');
+                
+                if (processing) {
+                    console.log('[Records] 处理正在进行中，忽略点击');
+                    return;
+                }
+                
+                if (!confirm('确定要重新识别所有未命名的记录吗？这可能需要一些时间。')) {
+                    console.log('[Records] 用户取消了操作');
+                    return;
+                }
+                
+                console.log('[Records] 开始发送重新识别请求');
+                processing = true;
+                btnReidentify.disabled = true;
+                
+                const btnText = btnReidentify.querySelector('span:first-child');
+                if (btnText) {
+                    btnText.textContent = '正在处理...';
+                }
+                const btnSpinner = btnReidentify.querySelector('.spinner-border');
+                if (btnSpinner) {
+                    btnSpinner.classList.remove('d-none');
+                }
+                
+                // 使用 fetch API 发送请求
+                console.log('[Records] 发送 fetch 请求到 /api/records/reidentify');
+                fetch('/api/records/reidentify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => {
+                    console.log('[Records] 收到响应，状态码:', response.status);
+                    if (!response.ok) {
+                        // 尝试读取错误信息
+                        return response.text().then(text => {
+                            console.error('[Records] 响应错误内容:', text);
+                            throw new Error('HTTP ' + response.status + ': ' + text);
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('[Records] 重新识别请求成功:', data);
+                    if (data.success) {
+                        alert('重新识别任务已启动！\n' + data.message + '\n\n请稍后刷新页面查看结果。');
+                        setTimeout(function() {
+                            location.reload();
+                        }, 3000);
+                    } else {
+                        // 使用更友好的方式显示错误信息
+                        const errorMsg = data.message || '未知错误';
+                        // 如果错误信息包含换行，使用更详细的显示方式
+                        if (errorMsg.includes('\n')) {
+                            // 创建模态框显示详细错误
+                            const errorModal = document.createElement('div');
+                            errorModal.className = 'modal fade';
+                            errorModal.innerHTML = `
+                                <div class="modal-dialog modal-lg">
+                                    <div class="modal-content">
+                                        <div class="modal-header bg-danger text-white">
+                                            <h5 class="modal-title">重新识别失败</h5>
+                                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <pre style="white-space: pre-wrap; font-family: inherit;">${errorMsg}</pre>
+                                            <div class="mt-3">
+                                                <strong>解决方案：</strong>
+                                                <ol>
+                                                    <li>运行诊断脚本检查配置：<code>python check_reid_system.py</code></li>
+                                                    <li>检查config.py中的ReID系统路径配置</li>
+                                                    <li>确保ReID系统已正确安装</li>
+                                                    <li>查看服务器日志获取更多信息</li>
+                                                </ol>
+                                            </div>
+                                        </div>
+                                        <div class="modal-footer">
+                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                            document.body.appendChild(errorModal);
+                            const modal = new bootstrap.Modal(errorModal);
+                            modal.show();
+                            // 模态框关闭后移除元素
+                            errorModal.addEventListener('hidden.bs.modal', function() {
+                                document.body.removeChild(errorModal);
+                            });
+                        } else {
+                            alert('重新识别失败: ' + errorMsg);
+                        }
+                        processing = false;
+                        btnReidentify.disabled = false;
+                        if (btnText) {
+                            btnText.textContent = '重新识别未命名记录';
+                        }
+                        if (btnSpinner) {
+                            btnSpinner.classList.add('d-none');
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('[Records] 重新识别请求失败:', error);
+                    alert('重新识别失败: ' + error.message + '\n\n请检查浏览器控制台查看详细信息。');
+                    processing = false;
+                    btnReidentify.disabled = false;
+                    if (btnText) {
+                        btnText.textContent = '重新识别未命名记录';
+                    }
+                    if (btnSpinner) {
+                        btnSpinner.classList.add('d-none');
+                    }
+                });
+            });
+            
+            console.log('[Records] 事件监听器已绑定');
+        });
+        
+        // 显示图片模态框
+        function showImageModal(imageUrl) {
+            const modalImage = document.getElementById('modalImage');
+            const imageModal = document.getElementById('imageModal');
+            if (modalImage && imageModal) {
+                modalImage.src = imageUrl;
+                // 使用Bootstrap 5的Modal API
+                const modal = new bootstrap.Modal(imageModal);
+                modal.show();
+            } else {
+                console.error('[Records] 模态框元素未找到');
+            }
+        }
+    </script>
+</body>
+</html>
+

@@ -6,6 +6,7 @@
 import cv2
 import time
 import threading
+import queue
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 from loguru import logger
@@ -78,10 +79,23 @@ class CameraMonitor:
         self.pts_base_offset = None  # PTS基准偏移量 (秒)
         self.use_pyav = False  # 是否使用PyAV（RTSP流使用，USB摄像头不使用）
 
-        # ==================== 时间校准相关 ====================
-        self.time_offset_seconds = None  # 时间偏移量（秒），用于修正RTSP延迟
-        self.time_calibration_method = None  # 实际使用的校准方法
-        self.enable_time_diagnosis = self.config.get('enable_time_diagnosis', False)  # 是否启用时间诊断
+        # ==================== 时间校准相关（已简化为使用系统时间）====================
+        self.time_offset_seconds = None  # 时间偏移量（秒），已弃用
+        self.time_calibration_method = None  # 实际使用的校准方法，已弃用
+
+        # 时间间隔控制（避免暴力sleep）
+        self.last_process_time = 0  # 上次处理时间（时间戳）
+        self.detection_interval = self.config.get('detection_wait_interval', 5)  # 检测间隔（秒）
+
+        # 自适应检测模式（智能频率控制）
+        self.detection_mode = 'fast'  # 检测模式：'fast'(快速/持续检测) 或 'slow'(慢速/10秒一次)
+        self.no_person_count = 0  # 慢速模式下连续未检测到人的次数
+        self.slow_mode_interval = 10  # 慢速模式的检测间隔（秒）
+        self.no_person_threshold = 30  # 连续N次未检测到人后切回快速模式
+
+        # 异步任务队列（避免I/O阻塞视频读取）
+        self.task_queue = queue.Queue(maxsize=100)  # 限制队列大小，防止内存溢出
+        self.worker_thread = None  # 后台工作线程（在start时启动）
 
         self.reconnect_attempts = 0
     
@@ -90,8 +104,19 @@ class CameraMonitor:
         if self.running:
             logger.warning(f"摄像头 {self.camera_name} 已在监测中")
             return
-        
+
         self.running = True
+
+        # 启动后台工作线程（处理耗时的I/O操作）
+        self.worker_thread = threading.Thread(
+            target=self._worker_process,
+            name=f"CameraWorker-{self.camera_id}",
+            daemon=True
+        )
+        self.worker_thread.start()
+        logger.info(f"后台工作线程已启动: {self.camera_name} (ID: {self.camera_id})")
+
+        # 启动监测主线程
         self.monitor_thread = threading.Thread(
             target=self._monitor_loop,
             name=f"CameraMonitor-{self.camera_id}",
@@ -107,7 +132,34 @@ class CameraMonitor:
             self.monitor_thread.join(timeout=5)
         self._release_capture()
         logger.info(f"停止监测摄像头: {self.camera_name} (ID: {self.camera_id})")
-    
+
+    def _worker_process(self):
+        """
+        后台工作线程，专门处理耗时任务（文件保存、YOLO检测、数据库写入）
+        这样主线程可以持续读取视频帧，避免缓冲区积压
+        """
+        logger.info(f"后台工作线程开始运行 - 摄像头: {self.camera_name}")
+
+        while self.running:
+            try:
+                # 从队列获取任务，超时1秒（避免线程卡死）
+                try:
+                    frame, capture_time = self.task_queue.get(timeout=1)
+                except queue.Empty:
+                    # 队列为空，继续等待
+                    continue
+
+                # 执行原有的耗时处理逻辑
+                self._save_detection_result(frame, capture_time)
+
+                # 标记任务完成
+                self.task_queue.task_done()
+
+            except Exception as e:
+                logger.error(f"后台工作线程异常 - 摄像头: {self.camera_name}: {e}", exc_info=True)
+
+        logger.info(f"后台工作线程已停止 - 摄像头: {self.camera_name}")
+
     def _monitor_loop(self):
         """监测主循环"""
         while self.running and self.reconnect_attempts < self.config['max_reconnect_attempts']:
@@ -199,18 +251,20 @@ class CameraMonitor:
                     time.sleep(1)
                 
                 logger.info(f"摄像头 {self.camera_name} 背景建模学习完成，开始正常监测...")
-                
+
                 frame_count = 0
+                last_detection_time = 0  # 上次背景检测的时间（控制检测频率）
+
                 # 开始监测循环
                 while self.running:
                     try:
-                        # 读取一帧及其时间戳
+                        # 持续读取帧，绝不阻塞！
                         ret, frame, frame_time = self._read_frame_with_pts()
 
                         if not ret or frame is None:
                             logger.warning(f"摄像头 {self.camera_name} 获取帧失败，尝试重连")
                             break
-                        
+
                         # 验证帧数据有效性
                         try:
                             import numpy as np
@@ -218,7 +272,7 @@ class CameraMonitor:
                                 logger.warning(f"摄像头 {self.camera_name} 帧数据格式异常，跳过")
                                 time.sleep(0.1)
                                 continue
-                            
+
                             if len(frame.shape) < 2 or frame.shape[0] == 0 or frame.shape[1] == 0:
                                 logger.warning(f"摄像头 {self.camera_name} 帧尺寸异常: {frame.shape if hasattr(frame, 'shape') else 'unknown'}")
                                 time.sleep(0.1)
@@ -227,10 +281,28 @@ class CameraMonitor:
                             logger.warning(f"摄像头 {self.camera_name} 帧验证失败: {frame_check_error}")
                             time.sleep(0.1)
                             continue
-                        
+
                         frame_count += 1
-                        
-                        # 检测画面变化（使用背景建模）
+                        current_time = time.time()
+
+                        # 自适应检测频率控制（智能模式切换）
+                        # 快速模式：每1秒检测（适合无人/有变化但不是人的场景）
+                        # 慢速模式：每10秒检测（节省CPU，适合确认有人的场景）
+
+                        if self.detection_mode == 'slow':
+                            # 慢速模式：10秒检测一次
+                            if current_time - last_detection_time < self.slow_mode_interval:
+                                time.sleep(0.001)  # 极短休眠让出CPU
+                                continue
+                        else:
+                            # 快速模式：每1秒检测一次（平衡性能和实时性）
+                            if current_time - last_detection_time < 1.0:
+                                time.sleep(0.001)
+                                continue
+
+                        last_detection_time = current_time
+
+                        # 执行背景检测
                         has_change = self.detection.detect_change(frame)
                         
                         # 获取计算好的前景比例（从缓存中获取，避免重复计算）
@@ -257,39 +329,81 @@ class CameraMonitor:
                                     f" 前景比例: {change_percent:.3f}% (阈值: {threshold_percent:.3f}%, "
                                     f"连续帧: {consecutive_count}/{consecutive_threshold})"
                                 )
-                                # 检测到变化，获取最新帧并处理
+
+                                # 检测到变化，直接使用当前实时帧
                                 logger.info(f"摄像头 {self.camera_name} 检测到变化，正在处理...")
-                                # 重要：清空缓冲区，读取最新的帧，避免保存旧帧
-                                # RTSP流是连续连接的，缓冲区可能积累了很多旧帧
-                                # 需要读取并丢弃旧帧，确保获取到最新的帧
-                                # 使用PTS时间作为帧的拍摄时间（如果可用），否则使用系统时间
-                                save_frame, frame_capture_time = self._get_latest_frame_with_time()
-                                if save_frame is not None:
-                                    # 先用YOLO再次核实当前帧中是否有人
-                                    people_count_for_merge = self._count_people_in_frame(save_frame)
-                                    if people_count_for_merge is not None and people_count_for_merge <= 0:
-                                        logger.info(
-                                            f"YOLO核实当前帧无人员，本次变化视为非人员事件，"
-                                            f"不保存/合并记录 - 摄像头: {self.camera_name}"
-                                        )
-                                        # 重置连续帧计数，让后续检测重新开始
-                                        self.detection.consecutive_change_count = 0
-                                        continue  # 继续监测循环，不断开、不等待
 
-                                    # 直接保存检测结果（新逻辑使用30秒窗口自动合并）
-                                    logger.info(f"检测到人员，保存检测结果...")
-                                    # 使用帧捕获时的时间（frame_capture_time），而不是保存时的时间
-                                    self._save_detection_result(save_frame, frame_capture_time)
-
-                                    # 重置连续帧计数，避免后续继续触发
+                                # 先用YOLO核实当前帧中是否有人
+                                people_count_for_merge = self._count_people_in_frame(frame)
+                                if people_count_for_merge is not None and people_count_for_merge <= 0:
+                                    logger.info(
+                                        f"YOLO核实当前帧无人员，本次变化视为非人员事件，"
+                                        f"不保存/合并记录 - 摄像头: {self.camera_name}"
+                                    )
+                                    # 重置连续帧计数，让后续检测重新开始
                                     self.detection.consecutive_change_count = 0
 
-                                    # 新逻辑：不断开连接，继续监测
-                                    # 如果之后又检测到人，会根据时间间隔自动合并或创建新记录
-                                    logger.info(f"已处理检测结果，继续监测（不断开连接）...")
-                                    # 继续监测循环，不需要break
+                                    # 慢速模式下未检测到人，计数+1
+                                    if self.detection_mode == 'slow':
+                                        self.no_person_count += 1
+                                        logger.debug(
+                                            f"[慢速模式] 连续{self.no_person_count}次未检测到人 "
+                                            f"(阈值: {self.no_person_threshold}次)"
+                                        )
+
+                                        # 连续30次未检测到人，切回快速模式
+                                        if self.no_person_count >= self.no_person_threshold:
+                                            self.detection_mode = 'fast'
+                                            self.no_person_count = 0
+                                            logger.info(
+                                                f"🔄 [{self.camera_name}] 连续{self.no_person_threshold}次未检测到人 "
+                                                f"(约{self.no_person_threshold * self.slow_mode_interval / 60:.1f}分钟)，"
+                                                f"切换到快速检测模式"
+                                            )
+
+                                    continue  # 继续监测循环，不断开、不等待
+
+                                # YOLO确认有人，检查冷却时间（避免同一人频繁保存）
+                                current_time = time.time()
+                                time_since_last_process = current_time - self.last_process_time
+
+                                if time_since_last_process < self.detection_interval:
+                                    logger.debug(
+                                        f"[{self.camera_name}] 检测到人员，但距离上次保存仅 {time_since_last_process:.1f}秒，"
+                                        f"等待 {self.detection_interval}秒冷却，跳过本次保存"
+                                    )
+                                    # 继续检测，不进入慢速模式（因为确实有人）
+                                    continue
+
+                                # 更新保存时间
+                                self.last_process_time = current_time
+
+                                # 异步保存检测结果：将任务放入队列，由后台线程处理
+                                logger.info(f"检测到人员，添加到处理队列...")
+                                if not self.task_queue.full():
+                                    # frame.copy() 非常重要！因为frame会被下一帧覆盖
+                                    self.task_queue.put((frame.copy(), frame_time))
+                                    logger.info(f"✓ 任务已加入队列 - 摄像头: {self.camera_name}")
                                 else:
-                                    logger.warning(f"摄像头 {self.camera_name} 无法获取最新帧，跳过保存")
+                                    logger.warning(f"任务队列已满，跳过当前帧 - {self.camera_name}")
+
+                                # 检测到人员，切换到慢速模式（节省CPU）
+                                if self.detection_mode == 'fast':
+                                    self.detection_mode = 'slow'
+                                    logger.info(
+                                        f"🔄 [{self.camera_name}] 检测到人员，"
+                                        f"切换到慢速检测模式（{self.slow_mode_interval}秒/次）"
+                                    )
+
+                                # 重置未检测到人的计数
+                                self.no_person_count = 0
+
+                                # 重置连续帧计数，避免后续继续触发
+                                self.detection.consecutive_change_count = 0
+
+                                # 新逻辑：不断开连接，继续监测
+                                # 如果之后又检测到人，会根据时间间隔自动合并或创建新记录
+                                logger.info(f"继续监测（慢速模式，主线程继续读取视频）...")
                             else:
                                 # 判断当前帧是否超过阈值（但不一定触发检测，因为需要连续帧）
                                 frame_exceeds_threshold = change_ratio > self.detection.threshold
@@ -315,17 +429,11 @@ class CameraMonitor:
                         # 每50帧输出一次详细状态
                         if frame_count % 50 == 0:
                             logger.debug(f"摄像头 {self.camera_name} 已处理 {frame_count} 帧，监测正常...")
-                        
-                        # 动态采样间隔：如果检测到变化，等待更长时间；否则正常采样间隔
-                        if has_change:
-                            # 检测到有人，等待5秒后再检测
-                            wait_time = self.config.get('detection_wait_interval', 5)
-                            logger.debug(f"[{self.camera_name}] 检测到画面变化，等待 {wait_time} 秒后进行下一次检测...")
-                            time.sleep(wait_time)
-                        else:
-                            # 正常情况，每秒检测一次
-                            time.sleep(self.config['sample_interval'])
-                        
+
+                        # 极短休眠让出CPU，避免100%占用，但不阻塞缓冲区
+                        # 关键：这里只是礼让CPU，不是控制采样率
+                        time.sleep(0.005)  # 5ms，既能让出CPU，又不影响实时性
+
                     except Exception as e:
                         logger.error(f"监测过程中发生异常 - 摄像头: {self.camera_name}: {e}")
                         # 继续监测，不中断
@@ -1213,179 +1321,16 @@ class CameraMonitor:
             logger.error(f"判断是否合并记录失败 - 摄像头: {self.camera_name}: {e}", exc_info=True)
             return False  # 异常时不合并，创建新记录
     
-    def _get_latest_frame_with_time(self) -> Tuple[Optional[any], Optional[datetime]]:
-        """
-        获取最新的帧及其时间戳用于保存
-        清空缓冲区，读取并丢弃旧帧，确保获取到最新的帧
-
-        时间戳策略（根据配置）：
-        - 'realtime': 清空缓冲区后，使用系统时间（推荐，自动适应延迟变化）
-        - 'pts_auto': 使用PTS时间+自动校准（需要RTCP支持）
-        - 'pts_fixed': 使用PTS时间+固定偏移（手动配置）
-
-        Returns:
-            Tuple[frame, timestamp]: (最新的帧数据, 时间戳)，失败返回(None, None)
-        """
-        try:
-            import numpy as np
-
-            latest_frame = None
-            latest_time = None
-            now = datetime.now()
-
-            if self.use_pyav and self.av_decoder is not None:
-                # ========== 策略1: PyAV - 基于时间的智能清空 ==========
-                logger.debug(f"使用PyAV基于时间清空缓冲区 - 摄像头: {self.camera_name}")
-
-                max_read_count = 200  # 最大读取帧数，避免死循环（25fps×8秒）
-                frames_read = 0
-
-                for i in range(max_read_count):
-                    ret, frame, frame_time = self._read_frame_with_pts()
-                    frames_read += 1
-
-                    if not ret or frame is None:
-                        logger.warning(f"读取帧失败，使用已有的最新帧")
-                        break
-
-                    # 验证帧有效性
-                    if isinstance(frame, np.ndarray) and len(frame.shape) >= 2:
-                        height, width = frame.shape[:2]
-                        if height >= 100 and width >= 100:
-                            latest_frame = frame.copy()
-                            latest_time = frame_time
-
-                            # 如果有准确的PTS时间，检查是否接近当前时间
-                            if frame_time:
-                                time_diff = (now - frame_time).total_seconds()
-
-                                # 如果帧时间与当前时间差距小于1秒，认为是最新帧
-                                if time_diff < 1.0:
-                                    logger.info(
-                                        f"✓ 获取到实时帧！读取{frames_read}帧，"
-                                        f"时间差: {time_diff:.2f}秒，"
-                                        f"帧时间: {frame_time.strftime('%H:%M:%S.%f')[:-3]}"
-                                    )
-                                    break
-                                elif i % 20 == 0:  # 每20帧输出一次进度
-                                    logger.debug(
-                                        f"继续清空缓冲区...已读{frames_read}帧，"
-                                        f"当前帧延迟: {time_diff:.2f}秒"
-                                    )
-
-                if latest_frame is not None:
-                    final_diff = (now - latest_time).total_seconds() if latest_time else 0
-                    logger.info(
-                        f"✓ PyAV缓冲区清空完成 - 摄像头: {self.camera_name}, "
-                        f"共读取{frames_read}帧，最终时间差: {final_diff:.2f}秒"
-                    )
-
-                    # ========== 应用时间戳策略 ==========
-                    timestamp_strategy = self.config.get('timestamp_strategy', 'realtime')
-                    if timestamp_strategy == 'realtime':
-                        # 使用实时系统时间（推荐）
-                        final_time = datetime.now()
-                        logger.info(
-                            f"✓ 使用实时系统时间策略 - 摄像头: {self.camera_name}, "
-                            f"PTS时间: {latest_time.strftime('%H:%M:%S.%f')[:-3]}, "
-                            f"实际使用: {final_time.strftime('%H:%M:%S.%f')[:-3]}"
-                        )
-                    else:
-                        # 使用PTS时间（pts_auto 或 pts_fixed）
-                        final_time = latest_time
-
-                    return latest_frame, final_time
-                else:
-                    logger.warning(f"PyAV清空缓冲区失败，未获取到有效帧")
-                    return None, None
-
-            else:
-                # ========== 策略2: OpenCV - 基于数量的彻底清空 ==========
-                logger.debug(f"使用OpenCV基于数量清空缓冲区 - 摄像头: {self.camera_name}")
-
-                # USB摄像头或无PTS的RTSP流，没有准确时间戳
-                # 休眠5秒可能积压 5×25=125帧，读取100帧确保清空
-                buffer_clear_count = 100  # 大幅增加清空数量
-
-                for i in range(buffer_clear_count):
-                    ret, frame, frame_time = self._read_frame_with_pts()
-                    if ret and frame is not None:
-                        # 验证帧有效性
-                        if isinstance(frame, np.ndarray) and len(frame.shape) >= 2:
-                            height, width = frame.shape[:2]
-                            if height >= 100 and width >= 100:
-                                latest_frame = frame.copy()
-                                latest_time = frame_time
-                            else:
-                                if i == buffer_clear_count - 1:
-                                    logger.warning(f"帧尺寸过小: {width}x{height}")
-                        else:
-                            if i == buffer_clear_count - 1:
-                                logger.warning(f"帧格式无效")
-                    else:
-                        # 读取失败，使用已有帧
-                        if latest_frame is not None:
-                            break
-                        if i == 0:
-                            time.sleep(0.1)
-
-                    # 每隔20帧输出进度
-                    if i > 0 and i % 20 == 0:
-                        logger.debug(f"OpenCV缓冲区清空进度: {i}/{buffer_clear_count}帧")
-
-                if latest_frame is not None:
-                    logger.info(
-                        f"✓ OpenCV缓冲区清空完成 - 摄像头: {self.camera_name}, "
-                        f"共读取{buffer_clear_count}帧"
-                    )
-
-                    # ========== 应用时间戳策略 ==========
-                    # OpenCV默认就是系统时间，但为了一致性也检查配置
-                    timestamp_strategy = self.config.get('timestamp_strategy', 'realtime')
-                    if timestamp_strategy == 'realtime':
-                        # 使用实时系统时间
-                        final_time = datetime.now()
-                    else:
-                        # OpenCV没有PTS，只能使用系统时间
-                        final_time = latest_time if latest_time else datetime.now()
-
-                    return latest_frame, final_time
-                else:
-                    logger.warning(f"OpenCV清空缓冲区失败，未获取到有效帧")
-                    return None, None
-
-        except Exception as e:
-            logger.error(f"获取最新帧失败: {e}", exc_info=True)
-            return None, None
-
-    def _get_latest_frame(self):
-        """
-        获取最新的帧用于保存（兼容旧接口）
-
-        Returns:
-            numpy.ndarray: 最新的帧数据，失败返回None
-        """
-        frame, _ = self._get_latest_frame_with_time()
-        return frame
-    
-    def _get_clean_frame(self):
-        """
-        获取一个完整、干净的帧用于保存（已废弃，使用_get_latest_frame代替）
-        多次尝试读取，直到获取到有效帧
-        
-        Returns:
-            numpy.ndarray: 有效的帧数据，失败返回None
-        """
-        # 直接调用_get_latest_frame
-        return self._get_latest_frame()
-    
     def _save_detection_result(self, frame, detection_time=None):
         """
         保存检测结果（包含YOLO人员检测）
-        新逻辑：30秒内的检测合并到同一条轨迹记录
+        新逻辑：
+        1. 先在内存中进行YOLO检测
+        2. 只有检测到人才保存图片和数据库记录
+        3. 30秒内的检测合并到同一条轨迹记录
 
         Args:
-            frame: 视频帧
+            frame: 视频帧(numpy array)
             detection_time: 检测时间
         """
         try:
@@ -1394,25 +1339,9 @@ class CameraMonitor:
             # 0. 首先确定准确的检测时间（用于文件名和数据库）
             current_time = detection_time if detection_time is not None else datetime.now()
 
-            # 1. 保存图片（返回相对路径，如：20251212/29_摄像头名称_20251212144441.jpg）
-            # ✅ 传递准确的拍摄时间，确保文件名时间戳正确
-            image_relative_path = self.storage.save_image(
-                frame,
-                self.camera_id,
-                self.camera_name,
-                capture_time=current_time  # ← 关键修复！
-            )
-
-            if image_relative_path is None:
-                logger.warning(f"保存图片失败，跳过记录 - 摄像头: {self.camera_name}")
-                return
-
-            # 2. 使用YOLO检测图片中的人员数量
+            # 1. 先在内存中进行YOLO检测（避免无效的磁盘I/O）
             people_count = None
             try:
-                # 计算图片的本地绝对路径
-                full_image_path = Path(self.storage.image_save_path) / image_relative_path
-
                 # 懒加载 YOLO 检测器（避免每次都重新加载模型）
                 if self.person_detector is None:
                     try:
@@ -1444,30 +1373,50 @@ class CameraMonitor:
                         )
                         self.person_detector = None
 
+                # 直接在内存中检测（不需要先保存到硬盘）
                 if self.person_detector is not None:
-                    detections = self.person_detector.detect(full_image_path)
+                    # 根据检测器类型选择检测方法
+                    if hasattr(self.person_detector, 'detect_image'):
+                        # 自适应检测器（YOLOv11）- 直接传入frame
+                        detections = self.person_detector.detect_image(frame)
+                    elif hasattr(self.person_detector, 'get_person_count'):
+                        # 某些检测器可能有get_person_count方法
+                        people_count = self.person_detector.get_person_count(frame)
+                        detections = [{}] * people_count if people_count > 0 else []
+                    else:
+                        # 传统YOLO检测器 - 使用model.predict
+                        results = self.person_detector.model.predict(
+                            frame,
+                            conf=self.person_detector.conf_threshold,
+                            iou=self.person_detector.iou_threshold,
+                            classes=[0],  # 只检测人
+                            device=self.person_detector.device,
+                            verbose=False,
+                        )
+                        if results:
+                            boxes = results[0].boxes
+                            detections = [{}] * len(boxes) if boxes is not None else []
+                        else:
+                            detections = []
+
                     people_count = len(detections)
                     logger.info(
-                        f"YOLO人员检测结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), "
-                        f"人数: {people_count}, 图片: {full_image_path}"
+                        f"✓ 内存YOLO检测结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), "
+                        f"人数: {people_count}"
                     )
 
-                    # 如果没有检测到人，则删除图片并不保存记录
+                    # 如果没有检测到人，直接返回，不保存任何文件
                     if people_count <= 0:
-                        logger.info(
-                            f"YOLO未检测到人员，本次检测结果忽略，不保存数据库记录 - 摄像头: {self.camera_name}"
+                        logger.debug(
+                            f"YOLO未检测到人员，跳过保存 - 摄像头: {self.camera_name}"
                         )
-                        try:
-                            if full_image_path.exists():
-                                full_image_path.unlink()
-                                logger.debug(f"已删除无效图片文件: {full_image_path}")
-                        except Exception as del_err:
-                            logger.warning(f"删除图片文件失败: {full_image_path}, 错误: {del_err}")
                         return
                 else:
                     logger.warning(
                         f"YOLO检测器不可用，无法统计人数，将继续保存记录但不写入人数字段 - 摄像头: {self.camera_name}"
                     )
+                    people_count = None
+
             except Exception as det_err:
                 logger.error(
                     f"执行YOLO人员检测时发生错误，将继续保存记录但不写入人数字段: {det_err}",
@@ -1475,33 +1424,23 @@ class CameraMonitor:
                 )
                 people_count = None
 
+            # 2. 只有检测到人才保存图片（节省磁盘I/O和存储空间）
+            logger.info(f"检测到 {people_count} 人，正在保存证据...")
+            image_relative_path = self.storage.save_image(
+                frame,
+                self.camera_id,
+                self.camera_name,
+                capture_time=current_time
+            )
+
+            if image_relative_path is None:
+                logger.warning(f"保存图片失败，跳过记录 - 摄像头: {self.camera_name}")
+                return
+
             # 3. 将相对路径转换为完整的URL路径
             image_url = self.storage.get_image_url(image_relative_path)
 
-            # 4. current_time 已在函数开头计算（line 1395），这里直接使用
-
-            # ==================== 时间诊断日志 ====================
-            if self.enable_time_diagnosis:
-                system_time = datetime.now()
-                time_diff = (system_time - current_time).total_seconds()
-
-                logger.info(
-                    f"⏱️ 时间诊断 - 摄像头: {self.camera_name}, "
-                    f"PTS时间: {current_time.strftime('%H:%M:%S.%f')[:-3]}, "
-                    f"系统时间: {system_time.strftime('%H:%M:%S.%f')[:-3]}, "
-                    f"时间差: {time_diff:.2f}秒, "
-                    f"校准方法: {self.time_calibration_method or 'none'}, "
-                    f"偏移量: {self.time_offset_seconds or 0:.2f}秒"
-                )
-
-                # 如果时间差异过大，发出警告
-                if abs(time_diff) > 2.0:
-                    logger.warning(
-                        f"⚠️ 时间偏移较大 ({time_diff:.2f}秒) - 摄像头: {self.camera_name}, "
-                        f"建议在config.py中手动设置 'pts_time_offset': {time_diff:.1f}"
-                    )
-
-            # 5. 检查是否在30秒窗口内，判断是否应该合并到现有轨迹
+            # 4. 检查是否在30秒窗口内，判断是否应该合并到现有轨迹
             merge_interval = 30  # 30秒合并窗口
             should_merge = False
 
@@ -1557,9 +1496,6 @@ class CameraMonitor:
                         # 更新缓存
                         self.current_trajectory['jscs'] = new_jscs
                         self.current_trajectory['last_time'] = current_time
-
-                        # 异步调用ReID识别人员姓名
-                        self._async_identify_person(frame, record_id)
                     else:
                         logger.warning(f"保存轨迹截图失败 - 轨迹ID: {record_id}")
                 else:
@@ -1596,9 +1532,6 @@ class CameraMonitor:
                         'last_time': current_time,
                         'max_rysl': people_count if people_count is not None else 0
                     }
-
-                    # 异步调用ReID识别人员姓名
-                    self._async_identify_person(frame, record_id)
                 else:
                     logger.warning(
                         f"保存记录失败 - 摄像头: {self.camera_name} (ID: {self.camera_id})"
@@ -1681,48 +1614,6 @@ class CameraMonitor:
             logger.error(f"YOLO合并前人数校验失败: {e}", exc_info=True)
             return None
 
-    def _async_identify_person(self, frame, record_id: int):
-        """
-        异步识别人员姓名
-        
-        Args:
-            frame: 视频帧
-            record_id: 数据库记录ID
-        """
-        def identify():
-            try:
-                from reid_integration import ReIDIntegration
-                reid = ReIDIntegration()
-                
-                if not reid.enabled:
-                    logger.debug("ReID系统未启用，跳过人员识别")
-                    return
-                
-                # 识别人员姓名
-                person_name = reid.identify_person_from_frame(frame)
-                
-                if person_name:
-                    # 更新数据库记录，添加人员姓名到ryxm字段
-                    success = self.db.update_person_name(record_id, person_name)
-                    if success:
-                        logger.info(
-                            f"✓ 识别到人员: {person_name} "
-                            f"(摄像头: {self.camera_name}, 记录ID: {record_id})"
-                        )
-                    else:
-                        logger.warning(f"更新人员姓名失败 - 记录ID: {record_id}")
-                else:
-                    logger.debug(f"未识别到人员 (摄像头: {self.camera_name}, 记录ID: {record_id})")
-                    
-            except ImportError:
-                logger.debug("ReID集成模块未找到，跳过人员识别")
-            except Exception as e:
-                logger.error(f"ReID识别失败 (记录ID: {record_id}): {e}", exc_info=True)
-        
-        # 启动异步线程
-        thread = threading.Thread(target=identify, daemon=True)
-        thread.start()
-    
     def is_running(self) -> bool:
         """检查是否正在运行"""
         return self.running

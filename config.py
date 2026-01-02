@@ -28,22 +28,17 @@ RTSP_MONITOR_CONFIG = {
     'change_threshold': 0.001,
 
     # ==================== 时间校准配置 ====================
-    # PTS时间偏移校准（秒）
-    # 用于修正RTSP流延迟导致的时间偏移
-    # 正值：PTS时间减去此值（如果PTS时间比实际晚）
-    # 负值：PTS时间加上此值（如果PTS时间比实际早）
-    # None：自动检测（推荐）
+    # 时间戳策略
+    # 'realtime': 使用实时系统时间（推荐，最准确）- 清空缓冲区后使用当前系统时间
+    # 'pts_auto': 使用PTS时间+自动校准 - 尝试从RTCP获取偏移，失败则使用PTS
+    # 'pts_fixed': 使用PTS时间+固定偏移 - 需手动配置pts_time_offset
+    'timestamp_strategy': 'realtime',
+
+    # PTS固定偏移（仅当timestamp_strategy='pts_fixed'时使用）
     'pts_time_offset': None,
 
-    # 是否启用时间诊断日志（用于调试时间偏移问题）
+    # 是否启用时间诊断日志（用于调试）
     'enable_time_diagnosis': True,
-
-    # 时间校准方法优先级
-    # 'rtcp': 优先使用RTCP NTP时间戳（最准确）
-    # 'stream_metadata': 使用stream metadata中的时间信息
-    # 'manual': 使用手动配置的pts_time_offset
-    # 'auto': 自动选择最佳方法
-    'time_calibration_method': 'auto',
     
     # 重连间隔（秒）
     'reconnect_interval': 5,

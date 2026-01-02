@@ -9,3 +9,7 @@
 # runtime logs
 logs/
 *.log
+# Models
+models/
+*.pt
+*.onnx

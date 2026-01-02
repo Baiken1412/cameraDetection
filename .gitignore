@@ -1,0 +1,10 @@
+# Model files (do NOT commit)
+models/
+*.pt
+*.onnx
+
+# Logs
+logs/
+
+# IDE
+.idea/

@@ -946,11 +946,13 @@ class CameraMonitor:
         """
         初始化PyAV流以获取PTS支持
 
+        注意：此函数失败不影响OpenCV连接，可以继续使用OpenCV读取帧
+
         Returns:
             bool: 初始化成功返回True
         """
         try:
-            # 释放之前的PyAV资源
+            # 释放之前的PyAV资源（不影响OpenCV的self.cap）
             self._release_pyav()
 
             # 打开RTSP流
@@ -1095,16 +1097,39 @@ class CameraMonitor:
                     )
                     # 立即释放PyAV资源，为重连做准备
                     self._release_pyav()
+                    # 重置use_pyav标志，下次重连时会重新尝试PyAV
+                    self.use_pyav = False
                 else:
                     # 其他错误（解码错误等）
-                    logger.error(f"PyAV读取帧失败 - 摄像头: {self.camera_name}, 错误: {e}")
+                    logger.error(
+                        f"PyAV读取帧失败 - 摄像头: {self.camera_name}, "
+                        f"错误: {e}, 将触发重连"
+                    )
+                    # 同样释放资源并重置标志
+                    self._release_pyav()
+                    self.use_pyav = False
 
                 return False, None, None
         else:
             # 使用OpenCV读取（USB摄像头或fallback）
-            ret, frame = self.cap.read()
-            frame_time = datetime.now() if ret else None
-            return ret, frame, frame_time
+            # 防御性检查：确保cap不是None
+            if self.cap is None:
+                logger.error(
+                    f"OpenCV VideoCapture为空 - 摄像头: {self.camera_name}, "
+                    f"可能是连接已断开，需要重连"
+                )
+                return False, None, None
+
+            try:
+                ret, frame = self.cap.read()
+                frame_time = datetime.now() if ret else None
+                return ret, frame, frame_time
+            except Exception as e:
+                logger.error(
+                    f"OpenCV读取帧失败 - 摄像头: {self.camera_name}, "
+                    f"错误: {e}"
+                )
+                return False, None, None
     
     def _should_record(self) -> bool:
         """
@@ -1193,15 +1218,13 @@ class CameraMonitor:
         获取最新的帧及其时间戳用于保存
         清空缓冲区，读取并丢弃旧帧，确保获取到最新的帧
 
-        重要：RTSP流是连续连接的，缓冲区可能积累了很多旧帧
-        休眠期间可能积压大量帧（例如5秒×25fps=125帧）
-
-        策略：
-        1. 【PyAV有PTS】基于时间清空：持续读取直到帧时间接近当前系统时间（误差<1秒）
-        2. 【OpenCV无PTS】基于数量清空：读取足够多的帧（100帧）彻底清空缓冲区
+        时间戳策略（根据配置）：
+        - 'realtime': 清空缓冲区后，使用系统时间（推荐，自动适应延迟变化）
+        - 'pts_auto': 使用PTS时间+自动校准（需要RTCP支持）
+        - 'pts_fixed': 使用PTS时间+固定偏移（手动配置）
 
         Returns:
-            Tuple[frame, timestamp]: (最新的帧数据, PTS时间戳或系统时间)，失败返回(None, None)
+            Tuple[frame, timestamp]: (最新的帧数据, 时间戳)，失败返回(None, None)
         """
         try:
             import numpy as np
@@ -1256,7 +1279,22 @@ class CameraMonitor:
                         f"✓ PyAV缓冲区清空完成 - 摄像头: {self.camera_name}, "
                         f"共读取{frames_read}帧，最终时间差: {final_diff:.2f}秒"
                     )
-                    return latest_frame, latest_time
+
+                    # ========== 应用时间戳策略 ==========
+                    timestamp_strategy = self.config.get('timestamp_strategy', 'realtime')
+                    if timestamp_strategy == 'realtime':
+                        # 使用实时系统时间（推荐）
+                        final_time = datetime.now()
+                        logger.info(
+                            f"✓ 使用实时系统时间策略 - 摄像头: {self.camera_name}, "
+                            f"PTS时间: {latest_time.strftime('%H:%M:%S.%f')[:-3]}, "
+                            f"实际使用: {final_time.strftime('%H:%M:%S.%f')[:-3]}"
+                        )
+                    else:
+                        # 使用PTS时间（pts_auto 或 pts_fixed）
+                        final_time = latest_time
+
+                    return latest_frame, final_time
                 else:
                     logger.warning(f"PyAV清空缓冲区失败，未获取到有效帧")
                     return None, None
@@ -1300,7 +1338,18 @@ class CameraMonitor:
                         f"✓ OpenCV缓冲区清空完成 - 摄像头: {self.camera_name}, "
                         f"共读取{buffer_clear_count}帧"
                     )
-                    return latest_frame, latest_time
+
+                    # ========== 应用时间戳策略 ==========
+                    # OpenCV默认就是系统时间，但为了一致性也检查配置
+                    timestamp_strategy = self.config.get('timestamp_strategy', 'realtime')
+                    if timestamp_strategy == 'realtime':
+                        # 使用实时系统时间
+                        final_time = datetime.now()
+                    else:
+                        # OpenCV没有PTS，只能使用系统时间
+                        final_time = latest_time if latest_time else datetime.now()
+
+                    return latest_frame, final_time
                 else:
                     logger.warning(f"OpenCV清空缓冲区失败，未获取到有效帧")
                     return None, None

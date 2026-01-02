@@ -35,22 +35,23 @@ class ImageStorage:
         if self.image_url_prefix:
             logger.info(f"图片URL前缀: {self.image_url_prefix}")
     
-    def save_image(self, frame, camera_id: int, camera_name: str) -> str:
+    def save_image(self, frame, camera_id: int, camera_name: str, capture_time: datetime = None) -> str:
         """
         保存图片并返回存储路径或Base64编码
-        
+
         Args:
             frame: 视频帧（numpy数组）
             camera_id: 摄像头ID
             camera_name: 摄像头名称
-        
+            capture_time: 帧的实际拍摄时间（用于生成准确的文件名），None则使用当前时间
+
         Returns:
             str: 文件路径或Base64编码字符串
         """
         try:
             if self.save_to_file:
                 # 保存到文件系统
-                return self._save_to_file(frame, camera_id, camera_name)
+                return self._save_to_file(frame, camera_id, camera_name, capture_time)
             else:
                 # 转换为Base64
                 return self._convert_to_base64(frame)
@@ -58,15 +59,16 @@ class ImageStorage:
             logger.error(f"保存图片失败，摄像头ID: {camera_id}, 名称: {camera_name}: {e}")
             return None
     
-    def _save_to_file(self, frame, camera_id: int, camera_name: str) -> str:
+    def _save_to_file(self, frame, camera_id: int, camera_name: str, capture_time: datetime = None) -> str:
         """
         保存图片到文件系统
-        
+
         Args:
             frame: 视频帧
             camera_id: 摄像头ID
             camera_name: 摄像头名称
-        
+            capture_time: 帧的实际拍摄时间，None则使用当前时间
+
         Returns:
             str: 相对路径
         """
@@ -75,7 +77,7 @@ class ImageStorage:
             if frame is None:
                 logger.error("帧数据为None，无法保存")
                 return None
-            
+
             # 检查帧数据类型（兼容numpy数组和OpenCV的UMat）
             import numpy as np
             is_valid_frame = False
@@ -91,39 +93,43 @@ class ImageStorage:
                     is_valid_frame = True
             except Exception:
                 pass
-            
+
             if not is_valid_frame:
                 logger.error(f"帧数据格式无效: {type(frame)}")
                 return None
-            
+
             # 检查帧尺寸
             if len(frame.shape) < 2:
                 logger.error(f"帧尺寸无效: {frame.shape}")
                 return None
-            
+
             height, width = frame.shape[:2]
             if height == 0 or width == 0:
                 logger.error(f"帧尺寸为0: {width}x{height}")
                 return None
-            
+
             # 检查帧尺寸是否合理（过小的可能是损坏的）
             if height < 100 or width < 100:
                 logger.warning(f"帧尺寸过小，可能损坏: {width}x{height}")
                 return None
-            
+
             # 检查帧数据是否异常（检查是否有大量NaN或Inf）
             import numpy as np
             if np.any(np.isnan(frame)) or np.any(np.isinf(frame)):
                 logger.error("帧包含NaN或Inf值，数据损坏")
                 return None
-            
+
+            # 使用传入的拍摄时间，如果没有则使用当前时间
+            actual_time = capture_time if capture_time is not None else datetime.now()
+
             # 创建日期目录：yyyyMMdd
-            date_dir = datetime.now().strftime('%Y%m%d')
+            date_dir = actual_time.strftime('%Y%m%d')
             save_dir = Path(self.image_save_path) / date_dir
             save_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # 生成文件名：摄像头ID_摄像头名称_时间戳.jpg
-            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            # ✅ 使用准确的拍摄时间，而不是当前系统时间
+            timestamp = actual_time.strftime('%Y%m%d%H%M%S')
             # 清理文件名中的非法字符
             safe_name = self._sanitize_filename(camera_name)
             filename = f"{camera_id}_{safe_name}_{timestamp}.jpg"

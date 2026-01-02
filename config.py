@@ -19,13 +19,31 @@ DATABASE_CONFIG = {
 RTSP_MONITOR_CONFIG = {
     # 采样间隔（秒）- 正常情况下每秒检测一次
     'sample_interval': 1,
-    
+
     # 检测到变化后的等待间隔（秒）- 如果检测到有人，则等待此时间后再检测
     'detection_wait_interval': 10,
-    
+
     # 前景阈值（0.001表示0.1%的前景，降低阈值提高敏感度）
     # 如果检测不到变化，可以进一步降低到0.0005（0.05%）
     'change_threshold': 0.001,
+
+    # ==================== 时间校准配置 ====================
+    # PTS时间偏移校准（秒）
+    # 用于修正RTSP流延迟导致的时间偏移
+    # 正值：PTS时间减去此值（如果PTS时间比实际晚）
+    # 负值：PTS时间加上此值（如果PTS时间比实际早）
+    # None：自动检测（推荐）
+    'pts_time_offset': None,
+
+    # 是否启用时间诊断日志（用于调试时间偏移问题）
+    'enable_time_diagnosis': True,
+
+    # 时间校准方法优先级
+    # 'rtcp': 优先使用RTCP NTP时间戳（最准确）
+    # 'stream_metadata': 使用stream metadata中的时间信息
+    # 'manual': 使用手动配置的pts_time_offset
+    # 'auto': 自动选择最佳方法
+    'time_calibration_method': 'auto',
     
     # 重连间隔（秒）
     'reconnect_interval': 5,
@@ -38,7 +56,7 @@ RTSP_MONITOR_CONFIG = {
 
     # 图片访问URL前缀（用于存储到数据库的URL路径）
     # 本地开发环境：使用localhost + Java服务端口8090（HTTPS）
-    'image_url_prefix': 'https://localhost:8090/profile/caseapp/',
+    'image_url_prefix': '',
 
     # 是否保存图片到文件系统（True:保存文件，False:Base64存数据库）
     'save_image_to_file': True,

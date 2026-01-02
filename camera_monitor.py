@@ -78,6 +78,11 @@ class CameraMonitor:
         self.pts_base_offset = None  # PTS基准偏移量 (秒)
         self.use_pyav = False  # 是否使用PyAV（RTSP流使用，USB摄像头不使用）
 
+        # ==================== 时间校准相关 ====================
+        self.time_offset_seconds = None  # 时间偏移量（秒），用于修正RTSP延迟
+        self.time_calibration_method = None  # 实际使用的校准方法
+        self.enable_time_diagnosis = self.config.get('enable_time_diagnosis', False)  # 是否启用时间诊断
+
         self.reconnect_attempts = 0
     
     def start(self):
@@ -838,6 +843,104 @@ class CameraMonitor:
         self.time_base = None
         self.pts_base_time = None
         self.pts_base_offset = None
+        # 注意：time_offset_seconds 不重置，在重连时可以继续使用
+
+    def _calibrate_time_from_rtcp(self) -> Optional[float]:
+        """
+        尝试从RTCP获取NTP时间戳并计算时间偏移
+
+        Returns:
+            float: 时间偏移量（秒），如果获取失败返回None
+        """
+        try:
+            # 方法1: 检查container的start_time_realtime属性
+            if hasattr(self.av_container, 'start_time_realtime') and self.av_container.start_time_realtime:
+                # start_time_realtime 通常是微秒级的Unix时间戳
+                ntp_timestamp_us = self.av_container.start_time_realtime
+                ntp_datetime = datetime.fromtimestamp(ntp_timestamp_us / 1_000_000)
+
+                # 计算偏移：系统时间 - NTP时间
+                offset = (datetime.now() - ntp_datetime).total_seconds()
+
+                logger.info(
+                    f"✓ 从RTCP获取到NTP时间 - 摄像头: {self.camera_name}, "
+                    f"NTP时间: {ntp_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}, "
+                    f"时间偏移: {offset:.2f}秒"
+                )
+                return offset
+
+            # 方法2: 从stream metadata获取
+            if self.av_stream and hasattr(self.av_stream, 'metadata') and self.av_stream.metadata:
+                metadata = self.av_stream.metadata
+
+                # 检查常见的时间相关metadata字段
+                for key in ['creation_time', 'timecode', 'start_time']:
+                    if key in metadata:
+                        logger.debug(f"发现stream metadata[{key}]: {metadata[key]}")
+                        # 尝试解析时间
+                        try:
+                            # ISO格式：2024-12-12T14:30:45.123Z
+                            time_str = metadata[key]
+                            if 'T' in time_str:
+                                # 移除时区标识
+                                time_str = time_str.replace('Z', '').split('+')[0].split('-')[0]
+                                stream_time = datetime.strptime(time_str.split('.')[0], '%Y-%m-%dT%H:%M:%S')
+
+                                offset = (datetime.now() - stream_time).total_seconds()
+                                logger.info(
+                                    f"✓ 从stream metadata获取到时间 - 摄像头: {self.camera_name}, "
+                                    f"Stream时间: {stream_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                                    f"时间偏移: {offset:.2f}秒"
+                                )
+                                return offset
+                        except Exception as parse_err:
+                            logger.debug(f"解析metadata时间失败: {parse_err}")
+
+            logger.debug(f"未能从RTCP/metadata获取时间信息 - 摄像头: {self.camera_name}")
+            return None
+
+        except Exception as e:
+            logger.debug(f"RTCP时间校准失败 - 摄像头: {self.camera_name}, 错误: {e}")
+            return None
+
+    def _auto_calibrate_time_offset(self) -> float:
+        """
+        自动计算时间偏移量
+        综合多种方法，按优先级尝试
+
+        Returns:
+            float: 时间偏移量（秒），默认返回0
+        """
+        calibration_method = self.config.get('time_calibration_method', 'auto')
+
+        # 1. 如果配置了手动偏移，直接使用
+        manual_offset = self.config.get('pts_time_offset')
+        if manual_offset is not None:
+            logger.info(
+                f"使用手动配置的时间偏移 - 摄像头: {self.camera_name}, "
+                f"偏移: {manual_offset:.2f}秒"
+            )
+            self.time_calibration_method = 'manual'
+            return manual_offset
+
+        # 2. 尝试从RTCP/metadata自动获取
+        if calibration_method in ['auto', 'rtcp', 'stream_metadata']:
+            rtcp_offset = self._calibrate_time_from_rtcp()
+            if rtcp_offset is not None:
+                self.time_calibration_method = 'rtcp'
+                return rtcp_offset
+
+        # 3. 默认：估算RTSP流延迟（基于缓冲区清空时间）
+        # 这是一个粗略估算，假设第一帧到达时的延迟代表整体延迟
+        logger.warning(
+            f"⚠️ 无法自动校准时间偏移 - 摄像头: {self.camera_name}, "
+            f"将使用默认值0秒（可能存在延迟）"
+        )
+        logger.warning(
+            f"💡 建议：在config.py中设置 'pts_time_offset' 参数来手动校准时间偏移"
+        )
+        self.time_calibration_method = 'none'
+        return 0.0
 
     def _init_pyav_stream(self) -> bool:
         """
@@ -897,6 +1000,23 @@ class CameraMonitor:
                         f"基准时间: {self.pts_base_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
                     )
 
+                    # ==================== 时间校准 ====================
+                    # 自动计算时间偏移量，修正RTSP流延迟
+                    if self.time_offset_seconds is None:  # 只在首次初始化时校准
+                        self.time_offset_seconds = self._auto_calibrate_time_offset()
+
+                        if self.time_offset_seconds != 0:
+                            logger.info(
+                                f"✓ 时间偏移校准完成 - 摄像头: {self.camera_name}, "
+                                f"偏移量: {self.time_offset_seconds:.2f}秒, "
+                                f"校准方法: {self.time_calibration_method}"
+                            )
+                        else:
+                            logger.warning(
+                                f"⚠️ 未应用时间偏移校准 - 摄像头: {self.camera_name}, "
+                                f"PTS时间可能存在延迟（等于RTSP传输延迟）"
+                            )
+
                     # 重新创建解码器（因为已经读取了一帧）
                     self.av_decoder = self.av_container.decode(self.av_stream)
 
@@ -915,13 +1035,13 @@ class CameraMonitor:
 
     def _pts_to_datetime(self, pts: int) -> datetime:
         """
-        将PTS转换为真实时间
+        将PTS转换为真实时间（应用时间偏移校准）
 
         Args:
             pts: Presentation Time Stamp
 
         Returns:
-            datetime: 转换后的真实时间
+            datetime: 转换后的真实时间（已校准）
         """
         if pts is None or self.time_base is None or self.pts_base_time is None:
             return datetime.now()
@@ -931,6 +1051,13 @@ class CameraMonitor:
 
         # 转换为真实时间：基准时间 + (当前PTS - 基准PTS)
         real_time = self.pts_base_time + timedelta(seconds=(pts_seconds - self.pts_base_offset))
+
+        # ==================== 应用时间偏移校准 ====================
+        # 如果存在时间偏移，修正RTSP流延迟
+        if self.time_offset_seconds is not None and self.time_offset_seconds != 0:
+            # 减去偏移量，得到摄像头的真实拍摄时间
+            # 例如：如果RTSP流延迟5秒，time_offset_seconds=5，则 real_time -= 5秒
+            real_time -= timedelta(seconds=self.time_offset_seconds)
 
         return real_time
 
@@ -1295,6 +1422,27 @@ class CameraMonitor:
 
             # 4. 使用传入的检测时间，如果没有则使用当前时间
             current_time = detection_time if detection_time is not None else datetime.now()
+
+            # ==================== 时间诊断日志 ====================
+            if self.enable_time_diagnosis:
+                system_time = datetime.now()
+                time_diff = (system_time - current_time).total_seconds()
+
+                logger.info(
+                    f"⏱️ 时间诊断 - 摄像头: {self.camera_name}, "
+                    f"PTS时间: {current_time.strftime('%H:%M:%S.%f')[:-3]}, "
+                    f"系统时间: {system_time.strftime('%H:%M:%S.%f')[:-3]}, "
+                    f"时间差: {time_diff:.2f}秒, "
+                    f"校准方法: {self.time_calibration_method or 'none'}, "
+                    f"偏移量: {self.time_offset_seconds or 0:.2f}秒"
+                )
+
+                # 如果时间差异过大，发出警告
+                if abs(time_diff) > 2.0:
+                    logger.warning(
+                        f"⚠️ 时间偏移较大 ({time_diff:.2f}秒) - 摄像头: {self.camera_name}, "
+                        f"建议在config.py中手动设置 'pts_time_offset': {time_diff:.1f}"
+                    )
 
             # 5. 检查是否在30秒窗口内，判断是否应该合并到现有轨迹
             merge_interval = 30  # 30秒合并窗口

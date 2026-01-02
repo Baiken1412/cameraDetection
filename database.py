@@ -309,7 +309,22 @@ class Database:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             from config import RTSP_MONITOR_CONFIG
 
-            base_url = RTSP_MONITOR_CONFIG['image_url_prefix'].split('/profile/')[0]
+            # === 修改开始 ===
+            # 原代码（已失效）：
+            # base_url = RTSP_MONITOR_CONFIG['image_url_prefix'].split('/profile/')[0]
+            
+            # 新代码：尝试从 camera_api_url 获取服务器地址，或者使用默认值
+            camera_api = RTSP_MONITOR_CONFIG.get('camera_api_url', '')
+            if '://' in camera_api:
+                # 例如从 'https://localhost:8090/spxz/hdgj/rtspStream' 提取 'https://localhost:8090'
+                from urllib.parse import urlparse
+                parsed = urlparse(camera_api)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+            else:
+                # 如果获取不到，就使用默认的本地地址
+                base_url = 'https://localhost:8090'
+            # === 修改结束 ===
+
             api_url = f"{base_url}/spxz/hdgj/syncEventForTrack/{record_id}"
 
             response = requests.post(api_url, timeout=5, verify=False)

@@ -882,22 +882,33 @@ class CameraMonitor:
                     f"成功读取 {success_count}/{test_frames} 测试帧"
                 )
 
-                # 连接成功后，尝试使用PyAV重新打开以获取PTS支持
-                if not self._init_pyav_stream():
-                    logger.warning(
-                        f"PyAV初始化失败，将继续使用OpenCV（无PTS支持） - 摄像头: {self.camera_name}"
+                # 根据时间戳策略决定是否需要初始化PyAV
+                timestamp_strategy = self.config.get('timestamp_strategy', 'realtime')
+
+                if timestamp_strategy in ['pts_auto', 'pts_fixed']:
+                    # 只有需要PTS时才初始化PyAV
+                    logger.debug(f"时间戳策略为 {timestamp_strategy}，尝试初始化PyAV获取PTS支持")
+                    if not self._init_pyav_stream():
+                        logger.warning(
+                            f"PyAV初始化失败，将继续使用OpenCV（无PTS支持） - 摄像头: {self.camera_name}"
+                        )
+                        self.use_pyav = False
+                    else:
+                        logger.info(f"PyAV初始化成功 - 摄像头: {self.camera_name}")
+                        # 关闭OpenCV连接，改用PyAV
+                        if self.cap is not None:
+                            try:
+                                self.cap.release()
+                            except:
+                                pass
+                            self.cap = None
+                        self.use_pyav = True
+                else:
+                    # realtime 策略不需要 PyAV，直接使用系统时间
+                    logger.debug(
+                        f"时间戳策略为 {timestamp_strategy}，使用系统时间，跳过PyAV初始化"
                     )
                     self.use_pyav = False
-                else:
-                    logger.info(f"PyAV初始化成功 - 摄像头: {self.camera_name}")
-                    # 关闭OpenCV连接，改用PyAV
-                    if self.cap is not None:
-                        try:
-                            self.cap.release()
-                        except:
-                            pass
-                        self.cap = None
-                    self.use_pyav = True
 
                 return True
             else:
@@ -1107,17 +1118,9 @@ class CameraMonitor:
                     # 时间校准已简化（直接使用系统时间）
                     if self.time_offset_seconds is None:
                         self.time_offset_seconds = 0  # 不再需要复杂校准
-                        if False:  # 禁用旧的时间校准逻辑
-                            logger.debug(
-                                f"时间校准已跳过 - 摄像头: {self.camera_name}, "
-                                f"直接使用系统时间, "
-                                f"校准方法: {self.time_calibration_method}"
-                            )
-                        else:
-                            logger.warning(
-                                f"⚠️ 未应用时间偏移校准 - 摄像头: {self.camera_name}, "
-                                f"PTS时间可能存在延迟（等于RTSP传输延迟）"
-                            )
+                        logger.debug(
+                            f"PTS时间基准已建立，使用简化校准 - 摄像头: {self.camera_name}"
+                        )
 
                     # 重新创建解码器（因为已经读取了一帧）
                     self.av_decoder = self.av_container.decode(self.av_stream)

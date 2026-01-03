@@ -1507,8 +1507,9 @@ class CameraMonitor:
             # 3. 将相对路径转换为完整的URL路径
             image_url = self.storage.get_image_url(image_relative_path)
 
-            # 4. 检查是否在30秒窗口内，判断是否应该合并到现有轨迹
-            merge_interval = 30  # 30秒合并窗口
+            # 4. 检查是否在合并窗口内，判断是否应该合并到现有轨迹
+            # 从配置文件读取合并间隔，默认30秒
+            merge_interval = self.config.get('trajectory_merge_interval', 30)
             should_merge = False
 
             if self.current_trajectory is not None:
@@ -1517,12 +1518,12 @@ class CameraMonitor:
                 if time_diff <= merge_interval:
                     should_merge = True
                     logger.info(
-                        f"检测到活动在30秒窗口内({time_diff:.1f}秒)，合并到现有轨迹 - "
+                        f"检测到活动在{merge_interval}秒窗口内({time_diff:.1f}秒)，合并到现有轨迹 - "
                         f"摄像头: {self.camera_name}, 轨迹ID: {self.current_trajectory['record_id']}"
                     )
                 else:
                     logger.info(
-                        f"距离上次检测已超过30秒({time_diff:.1f}秒)，创建新轨迹 - "
+                        f"距离上次检测已超过{merge_interval}秒({time_diff:.1f}秒)，创建新轨迹 - "
                         f"摄像头: {self.camera_name}"
                     )
 

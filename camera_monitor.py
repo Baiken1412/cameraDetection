@@ -179,13 +179,13 @@ class CameraMonitor:
                 # 连接成功，重置重连计数
                 self.reconnect_attempts = 0
                 
-                # 跳过前几帧，让摄像头稳定
-                logger.info(f"摄像头 {self.camera_name} 正在初始化，跳过前3帧...")
+                # 跳过前几帧，让摄像头稳定（持续读取避免缓冲区积压）
+                logger.info(f"摄像头 {self.camera_name} 正在初始化，快速跳过前3帧...")
                 for _ in range(3):
                     ret, frame, frame_time = self._read_frame_with_pts()
                     if ret and frame is not None:
                         pass  # 背景建模不需要保存前一帧
-                    time.sleep(0.5)
+                    time.sleep(0.001)  # 极小延迟，避免缓冲区积压
                 
                 # 背景建模需要更多时间学习背景
                 # 重要：学习阶段应该确保画面中没有运动物体
@@ -226,29 +226,47 @@ class CameraMonitor:
                 
                 # 学习阶段使用更高的学习率，快速建立背景模型
                 learning_phase_rate = 0.1  # 学习阶段使用10%的学习率
-                
-                for i in range(learning_time):  # 学习时间根据情况调整
+
+                # 改为基于时间控制，持续读取避免缓冲区积压
+                learning_start_time = time.time()
+                learning_end_time = learning_start_time + learning_time
+                frame_count_in_learning = 0
+                last_progress_log_time = learning_start_time
+
+                logger.info(f"开始背景建模学习阶段，目标时长: {learning_time}秒，持续读取避免缓冲区积压")
+
+                while time.time() < learning_end_time and self.running:
                     ret, frame, frame_time = self._read_frame_with_pts()
                     if ret and frame is not None:
                         try:
                             # 使用高学习率学习背景（学习阶段不进行形态学和过滤）
                             fg_mask = self.detection.bg_subtractor.apply(frame, learningRate=learning_phase_rate)
-                            
+                            frame_count_in_learning += 1
+
                             # 每5秒输出一次学习进度
-                            if (i + 1) % 5 == 0:
+                            current_time = time.time()
+                            if current_time - last_progress_log_time >= 5.0:
+                                elapsed = current_time - learning_start_time
                                 import numpy as np
                                 fg_pixels = np.count_nonzero(fg_mask)
                                 total_pixels = fg_mask.size
                                 fg_ratio = fg_pixels / total_pixels if total_pixels > 0 else 0
-                                logger.info(f"背景建模学习进度: {i+1}/{learning_time}秒, 当前前景比例: {fg_ratio*100:.3f}%")
-                                
+                                logger.info(
+                                    f"背景建模学习进度: {elapsed:.1f}/{learning_time}秒, "
+                                    f"已处理 {frame_count_in_learning} 帧, "
+                                    f"当前前景比例: {fg_ratio*100:.3f}%"
+                                )
+
                                 # 如果前景比例很高，说明学习阶段画面中有运动物体
                                 if fg_ratio > 0.1:  # 超过10%
                                     logger.warning(f"⚠️  学习阶段检测到大量前景 ({fg_ratio*100:.1f}%)，可能影响背景模型质量！")
+
+                                last_progress_log_time = current_time
                         except Exception as e:
                             logger.error(f"背景建模学习异常: {e}")
-                    
-                    time.sleep(1)
+
+                    # 极小延迟，避免CPU空转，但不阻塞流读取
+                    time.sleep(0.001)
                 
                 logger.info(f"摄像头 {self.camera_name} 背景建模学习完成，开始正常监测...")
 
@@ -333,8 +351,14 @@ class CameraMonitor:
                                 # 检测到变化，直接使用当前实时帧
                                 logger.info(f"摄像头 {self.camera_name} 检测到变化，正在处理...")
 
-                                # 先用YOLO核实当前帧中是否有人
+                                # 先用YOLO核实当前帧中是否有人（主线程执行，会阻塞200-500ms）
                                 people_count_for_merge = self._count_people_in_frame(frame)
+
+                                # 🚀 关键优化：YOLO检测完成后立即清空缓冲区
+                                # 在YOLO执行的200-500ms期间，缓冲区积压了约5-12帧
+                                # 必须清空，否则延迟会累积
+                                self._flush_buffer_after_yolo(max_frames=20)
+
                                 if people_count_for_merge is not None and people_count_for_merge <= 0:
                                     logger.info(
                                         f"YOLO核实当前帧无人员，本次变化视为非人员事件，"
@@ -607,7 +631,7 @@ class CameraMonitor:
             except Exception as e:
                 logger.debug(f"设置USB摄像头参数失败（将使用默认参数）: {e}")
 
-            # 测试读取帧
+            # 测试读取帧（快速验证，避免缓冲区积压）
             success_count = 0
             test_frames = 5
 
@@ -624,7 +648,7 @@ class CameraMonitor:
                         logger.warning(f"USB摄像头测试帧 {i+1} 尺寸异常: {frame.shape if frame is not None else 'None'}")
                 else:
                     logger.debug(f"USB摄像头测试帧 {i+1}/{test_frames} 读取失败")
-                time.sleep(0.1)
+                time.sleep(0.001)  # 极小延迟，避免缓冲区积压
 
             # 至少需要3帧成功
             if success_count >= 3:
@@ -855,10 +879,10 @@ class CameraMonitor:
             except (AttributeError, cv2.error):
                 pass
             
-            # 测试读取多帧，确保连接稳定
+            # 测试读取多帧，确保连接稳定（快速验证，避免缓冲区积压）
             success_count = 0
             test_frames = 5  # 增加测试帧数，确保连接稳定
-            
+
             for i in range(test_frames):
                 ret, frame = self.cap.read()
                 if ret and frame is not None:
@@ -873,7 +897,7 @@ class CameraMonitor:
                         logger.warning(f"测试帧 {i+1} 尺寸异常: {frame.shape if frame is not None else 'None'}")
                 else:
                     logger.debug(f"测试帧 {i+1}/{test_frames} 读取失败 - 摄像头: {self.camera_name}")
-                time.sleep(0.1)
+                time.sleep(0.001)  # 极小延迟，避免缓冲区积压
             
             # 至少需要3帧成功（提高要求，确保连接稳定）
             if success_count >= 3:
@@ -1233,7 +1257,55 @@ class CameraMonitor:
                     f"错误: {e}"
                 )
                 return False, None, None
-    
+
+    def _flush_buffer_after_yolo(self, max_frames: int = 20) -> int:
+        """
+        YOLO检测后清空缓冲区，追上最新进度
+
+        在主线程执行YOLO检测时（耗时200-500ms），视频流持续产生帧导致缓冲区积压。
+        此方法快速读取并丢弃缓冲区中的旧帧，确保后续使用最新数据。
+
+        Args:
+            max_frames: 最多读取的帧数（防止无限循环）
+
+        Returns:
+            int: 清空的帧数
+        """
+        flushed_count = 0
+
+        try:
+            if self.use_pyav and self.av_decoder is not None:
+                # PyAV 模式：快速消费解码器中的帧
+                for _ in range(max_frames):
+                    try:
+                        frame = next(self.av_decoder, None)
+                        if frame is None:
+                            break
+                        flushed_count += 1
+                    except StopIteration:
+                        break
+                    except Exception:
+                        break
+
+            elif self.cap is not None and self.cap.isOpened():
+                # OpenCV 模式：快速读取并丢弃
+                for _ in range(max_frames):
+                    ret = self.cap.grab()  # grab() 比 read() 快，只解码不返回
+                    if not ret:
+                        break
+                    flushed_count += 1
+
+            if flushed_count > 0:
+                logger.debug(
+                    f"[{self.camera_name}] YOLO检测后清空缓冲区，丢弃 {flushed_count} 帧旧数据 "
+                    f"(约 {flushed_count/25:.2f}秒延迟)"
+                )
+
+        except Exception as e:
+            logger.warning(f"[{self.camera_name}] 清空缓冲区异常: {e}")
+
+        return flushed_count
+
     def _should_record(self) -> bool:
         """
         判断是否需要记录（避免频繁记录）

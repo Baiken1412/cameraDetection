@@ -23,7 +23,7 @@ class CameraMonitor:
     def __init__(self, camera_info: dict, db: Database):
         """
         初始化摄像头监测
-        
+
         Args:
             camera_info: 摄像头配置信息
             db: 数据库连接对象
@@ -34,8 +34,15 @@ class CameraMonitor:
         self.area_name = camera_info.get('gnslx', '')  # 区域名称，用于保存到 qymc 字段
         self.rtsp_url = camera_info['rtspssl']
 
+        # 保存摄像头配置信息，用于构造备选URL
+        self.camera_ip = camera_info.get('ip', '')
+        self.camera_port = camera_info.get('dk', 554)  # 默认RTSP端口554
+        self.camera_channel = camera_info.get('tdh', 1)  # 默认通道1
+        self.camera_username = camera_info.get('zh', 'admin')  # 默认用户名admin
+        self.camera_password = camera_info.get('mm', '')  # 密码
+
         # 检查是否为USB摄像头
-        self.is_usb_camera = self.rtsp_url.startswith('usb:')
+        self.is_usb_camera = self.rtsp_url.startswith('usb:') if self.rtsp_url else False
 
         # 记录完整的URL用于调试
         if self.is_usb_camera:
@@ -46,7 +53,7 @@ class CameraMonitor:
 
             # 检查URL是否完整
             if not self.rtsp_url or len(self.rtsp_url.strip()) == 0:
-                logger.error(f"摄像头 {self.camera_name} RTSP URL为空！")
+                logger.warning(f"摄像头 {self.camera_name} RTSP URL为空，将尝试使用 IP+端口+通道号构造URL")
             elif 'rtsp://' not in self.rtsp_url.lower():
                 logger.warning(f"摄像头 {self.camera_name} RTSP URL格式可能不正确: {self.rtsp_url[:100]}")
         
@@ -478,13 +485,50 @@ class CameraMonitor:
         
         self.running = False
     
+    def _build_fallback_url_from_config(self) -> Optional[str]:
+        """
+        根据摄像头 ip、端口、通道号、账号、密码构造备选 RTSP URL
+        用于 rtspssl 字段为空或连接失败时的备选方案
+
+        Returns:
+            str: 构造的RTSP URL，如果信息不完整则返回None
+        """
+        # 检查必要的信息是否完整
+        if not self.camera_ip:
+            logger.warning(f"摄像头 {self.camera_name} (ID: {self.camera_id}) 缺少IP地址，无法构造备选URL")
+            return None
+
+        # 构造认证部分
+        auth_part = ""
+        if self.camera_username and self.camera_password:
+            auth_part = f"{self.camera_username}:{self.camera_password}@"
+        elif self.camera_username:
+            auth_part = f"{self.camera_username}@"
+
+        # 端口号（默认554）
+        port = self.camera_port if self.camera_port else 554
+
+        # 通道号（默认1）
+        channel = self.camera_channel if self.camera_channel else 1
+
+        # 常见的RTSP URL格式（海康威视为主）
+        # 格式1: rtsp://user:pass@ip:port/Streaming/Channels/{channel}01
+        fallback_url = f"rtsp://{auth_part}{self.camera_ip}:{port}/Streaming/Channels/{channel}01"
+
+        logger.info(
+            f"为摄像头 {self.camera_name} (ID: {self.camera_id}) 构造备选URL: {fallback_url[:80]}... "
+            f"(基于 IP={self.camera_ip}, 端口={port}, 通道={channel})"
+        )
+
+        return fallback_url
+
     def _generate_alternative_urls(self, base_url: str) -> list:
         """
         生成多种RTSP URL格式，用于自动尝试不同的URL路径
-        
+
         Args:
             base_url: 原始RTSP URL，格式如: rtsp://user:pass@ip:port/path
-            
+
         Returns:
             list: 多种URL格式的列表
         """
@@ -688,9 +732,26 @@ class CameraMonitor:
             # 如果是USB摄像头，使用专门的连接方法
             if self.is_usb_camera:
                 return self._connect_usb_camera()
-            
-            # 最多尝试两轮：第一轮使用当前 rtsp_url，失败后通过接口刷新并再尝试一轮
-            for round_idx in range(2):
+
+            # 检查 rtspssl 是否为空或无效，如果是，尝试使用备选URL（基于 ip+端口+通道号）
+            if not self.rtsp_url or len(self.rtsp_url.strip()) == 0 or 'rtsp://' not in self.rtsp_url.lower():
+                logger.warning(
+                    f"摄像头 {self.camera_name} (ID: {self.camera_id}) rtspssl字段为空或无效，"
+                    f"尝试使用 IP+端口+通道号 构造备选URL"
+                )
+                fallback_url = self._build_fallback_url_from_config()
+                if fallback_url:
+                    self.rtsp_url = fallback_url
+                    logger.info(f"已切换到备选URL: {self.rtsp_url[:80]}...")
+                else:
+                    logger.error(f"无法构造备选URL，摄像头配置不完整")
+                    return False
+
+            # 最多尝试三轮：
+            # 第一轮：使用当前 rtsp_url（可能是rtspssl或备选URL）
+            # 第二轮：通过接口刷新rtspssl
+            # 第三轮：使用备选URL（基于ip+端口+通道号）
+            for round_idx in range(3):
                 # 生成多种URL格式
                 alternative_urls = self._generate_alternative_urls(self.rtsp_url)
                 logger.info(
@@ -818,33 +879,59 @@ class CameraMonitor:
                 if connection_success:
                     break
 
-                # 如果这一轮连接失败，且是第一轮，则尝试通过接口刷新RTSP地址
-                if not connection_success and round_idx == 0:
-                    try:
-                        logger.warning(
-                            f"RTSP连接失败，尝试通过接口刷新摄像头配置后重试 - 摄像头: {self.camera_name} (ID: {self.camera_id})"
-                        )
-                        camera_info = self.db.get_camera_by_id(self.camera_id)
-                        if camera_info and camera_info.get('rtspssl'):
-                            new_url = camera_info['rtspssl']
-                            if new_url != self.rtsp_url:
-                                logger.info(
-                                    "更新摄像头RTSP地址: %s (ID: %s)\n  旧URL: %s...\n  新URL: %s...",
-                                    self.camera_name,
-                                    self.camera_id,
-                                    self.rtsp_url[:80],
-                                    new_url[:80],
-                                )
-                                self.rtsp_url = new_url
-                                # 如果接口返回了最新的名称/区域，也一并更新
-                                self.camera_name = camera_info.get('fjmc', self.camera_name)
-                                self.area_name = camera_info.get('gnslx', self.area_name)
+                # 如果这一轮连接失败，根据轮次采取不同策略
+                if not connection_success:
+                    if round_idx == 0:
+                        # 第一轮失败，尝试通过接口刷新RTSP地址
+                        try:
+                            logger.warning(
+                                f"RTSP连接失败（第1轮），尝试通过接口刷新摄像头配置后重试 - 摄像头: {self.camera_name} (ID: {self.camera_id})"
+                            )
+                            camera_info = self.db.get_camera_by_id(self.camera_id)
+                            if camera_info and camera_info.get('rtspssl'):
+                                new_url = camera_info['rtspssl']
+                                if new_url != self.rtsp_url:
+                                    logger.info(
+                                        "更新摄像头RTSP地址: %s (ID: %s)\n  旧URL: %s...\n  新URL: %s...",
+                                        self.camera_name,
+                                        self.camera_id,
+                                        self.rtsp_url[:80],
+                                        new_url[:80],
+                                    )
+                                    self.rtsp_url = new_url
+                                    # 如果接口返回了最新的名称/区域，也一并更新
+                                    self.camera_name = camera_info.get('fjmc', self.camera_name)
+                                    self.area_name = camera_info.get('gnslx', self.area_name)
+                                    # 同时更新配置信息（用于后续构造备选URL）
+                                    self.camera_ip = camera_info.get('ip', self.camera_ip)
+                                    self.camera_port = camera_info.get('dk', self.camera_port)
+                                    self.camera_channel = camera_info.get('tdh', self.camera_channel)
+                                    self.camera_username = camera_info.get('zh', self.camera_username)
+                                    self.camera_password = camera_info.get('mm', self.camera_password)
+                                else:
+                                    logger.info("接口返回的RTSP地址与当前相同，将直接重试连接")
                             else:
-                                logger.info("接口返回的RTSP地址与当前相同，将直接重试连接")
+                                logger.warning("接口未返回有效的摄像头配置，无法刷新RTSP地址")
+                        except Exception as refresh_err:
+                            logger.error(f"刷新摄像头RTSP地址失败: {refresh_err}", exc_info=True)
+
+                    elif round_idx == 1:
+                        # 第二轮失败（接口刷新后仍失败），尝试使用备选URL（基于ip+端口+通道号）
+                        logger.warning(
+                            f"RTSP连接失败（第2轮，接口刷新后），尝试使用备选URL（基于 IP+端口+通道号） - "
+                            f"摄像头: {self.camera_name} (ID: {self.camera_id})"
+                        )
+                        fallback_url = self._build_fallback_url_from_config()
+                        if fallback_url and fallback_url != self.rtsp_url:
+                            logger.info(
+                                f"切换到备选URL - 摄像头: {self.camera_name} (ID: {self.camera_id})\n"
+                                f"  原URL: {self.rtsp_url[:80]}...\n"
+                                f"  备选URL: {fallback_url[:80]}..."
+                            )
+                            self.rtsp_url = fallback_url
                         else:
-                            logger.warning("接口未返回有效的摄像头配置，无法刷新RTSP地址")
-                    except Exception as refresh_err:
-                        logger.error(f"刷新摄像头RTSP地址失败: {refresh_err}", exc_info=True)
+                            logger.warning(f"无法构造备选URL或备选URL与当前URL相同")
+                            # 第三轮将直接失败
 
             if not connection_success:
                 logger.error(

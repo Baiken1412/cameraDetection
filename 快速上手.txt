@@ -21,6 +21,8 @@ python generate_license.py --generate-keys
 客户把机器码发给你。
 
 
+python generate_license.py --create --machine-code --days 365
+
 三、生成许可证
 ----------------------------------------------------------------
 # 1年期（365天）

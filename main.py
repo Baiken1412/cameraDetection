@@ -45,30 +45,45 @@ class RtspMonitorSystem:
     def start_all_monitors(self):
         """启动所有摄像头监测"""
         logger.info("========== 开始启动RTSP监测服务 ==========")
-        
+
         # 查询所有有效的摄像头
         cameras = self.db.get_all_cameras()
-        
+
         if not cameras:
             logger.warning("未找到有效的摄像头配置")
             return
-        
+
         logger.info(f"找到 {len(cameras)} 个有效摄像头，开始启动监测...")
-        
+
+        # 统计启动情况
+        enabled_count = 0
+        disabled_count = 0
+
         # 为每个摄像头启动监测
         for camera in cameras:
             try:
+                # 检查 sblx 字段，只有当 sblx=1 时才进行视频检测和截取
+                sblx = camera.get('sblx')
+
+                # sblx 可能是整数1或字符串'1'
+                if sblx != 1 and sblx != '1':
+                    logger.info(f"摄像头 {camera.get('fjmc', 'Unknown')} (ID: {camera.get('id')}) sblx={sblx}，跳过视频检测")
+                    disabled_count += 1
+                    continue
+
+                logger.info(f"启动摄像头 {camera.get('fjmc', 'Unknown')} (ID: {camera.get('id')}) 监测 (sblx=1)")
                 monitor = CameraMonitor(camera, self.db)
                 monitor.start()
                 self.monitors[camera['id']] = monitor
-                
+                enabled_count += 1
+
                 # 避免同时启动过多连接，稍作延迟
                 time.sleep(1)
-                
+
             except Exception as e:
                 logger.error(f"启动摄像头 {camera.get('fjmc', 'Unknown')} 监测失败: {e}")
-        
-        logger.info("========== RTSP监测服务启动完成 ==========")
+
+        logger.info(f"========== RTSP监测服务启动完成 (已启动: {enabled_count}, 已跳过: {disabled_count}) ==========")
         self.running = True
     
     def stop_all_monitors(self):
@@ -112,30 +127,30 @@ def signal_handler(sig, frame):
 
 def main():
     """主函数"""
-    global monitor_system
+    # global monitor_system
 
-    # ========== 许可证验证 ==========
-    print("=" * 60)
-    print("正在验证软件许可证...")
-    print("=" * 60)
+    # # ========== 许可证验证 ==========
+    # print("=" * 60)
+    # print("正在验证软件许可证...")
+    # print("=" * 60)
 
-    license_manager = LicenseManager()
+    # license_manager = LicenseManager()
 
-    if not license_manager.check_license():
-        print("\n" + "=" * 60)
-        print("【许可证验证失败】")
-        print("=" * 60)
-        print(f"当前机器码: {license_manager.machine_code}")
-        print("\n请联系软件提供商获取有效的许可证文件。")
-        print("需要提供上述机器码以生成对应的许可证。")
-        print("=" * 60)
-        input("\n按Enter键退出...")
-        sys.exit(1)
+    # if not license_manager.check_license():
+    #     print("\n" + "=" * 60)
+    #     print("【许可证验证失败】")
+    #     print("=" * 60)
+    #     print(f"当前机器码: {license_manager.machine_code}")
+    #     print("\n请联系软件提供商获取有效的许可证文件。")
+    #     print("需要提供上述机器码以生成对应的许可证。")
+    #     print("=" * 60)
+    #     input("\n按Enter键退出...")
+    #     sys.exit(1)
 
-    print("\n" + "=" * 60)
-    print("【许可证验证成功】")
-    print("=" * 60)
-    print()
+    # print("\n" + "=" * 60)
+    # print("【许可证验证成功】")
+    # print("=" * 60)
+    # print()
 
     # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)

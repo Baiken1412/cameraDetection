@@ -47,7 +47,7 @@ RTSP_MONITOR_CONFIG = {
     'max_reconnect_attempts': 3,
     
     # 图片保存路径（本地文件系统路径，绝对路径）
-    'image_save_path': 'D:/ruoyi/uploadPath/caseapp',  # 例如: 'D:/ruoyi/uploadPath/caseapp'
+    'image_save_path': 'D:/appdata/uploadPath/caseapp',  # 例如: 'D:/ruoyi/uploadPath/caseapp'
 
     # 图片访问URL前缀（用于存储到数据库的URL路径）
     # 本地开发环境：使用localhost + Java服务端口8090（HTTPS）

@@ -4,7 +4,9 @@
       "Bash(python:*)",
       "Bash(dir:*)",
       "Bash(pip show:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(copy:*)",
+      "Bash(cat:*)"
     ]
   }
 }

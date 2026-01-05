@@ -4,6 +4,7 @@
 专注于人员检测和计数，弃用 ReID
 """
 import logging
+import sys
 from typing import List, Dict, Union
 from pathlib import Path
 import cv2
@@ -41,7 +42,14 @@ class AdaptivePersonDetector:
             force_engine: 强制使用指定引擎
             num_threads: 线程数（None=自动）
         """
-        self.model_dir = Path(model_dir)
+        # 处理打包后的路径（PyInstaller）
+        if getattr(sys, 'frozen', False):
+            # 打包后的EXE环境，使用临时解压目录
+            base_path = Path(sys._MEIPASS)
+            self.model_dir = base_path / model_dir
+        else:
+            # 开发环境，使用相对路径或绝对路径
+            self.model_dir = Path(model_dir)
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
 

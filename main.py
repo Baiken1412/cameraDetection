@@ -114,28 +114,28 @@ def main():
     """主函数"""
     global monitor_system
 
-    # ========== 许可证验证 ==========
-    print("=" * 60)
-    print("正在验证软件许可证...")
-    print("=" * 60)
-
-    license_manager = LicenseManager()
-
-    if not license_manager.check_license():
-        print("\n" + "=" * 60)
-        print("【许可证验证失败】")
-        print("=" * 60)
-        print(f"当前机器码: {license_manager.machine_code}")
-        print("\n请联系软件提供商获取有效的许可证文件。")
-        print("需要提供上述机器码以生成对应的许可证。")
-        print("=" * 60)
-        input("\n按Enter键退出...")
-        sys.exit(1)
-
-    print("\n" + "=" * 60)
-    print("【许可证验证成功】")
-    print("=" * 60)
-    print()
+#     # ========== 许可证验证 ==========
+#     print("=" * 60)
+#     print("正在验证软件许可证...")
+#     print("=" * 60)
+#
+#     license_manager = LicenseManager()
+#
+#     if not license_manager.check_license():
+#         print("\n" + "=" * 60)
+#         print("【许可证验证失败】")
+#         print("=" * 60)
+#         print(f"当前机器码: {license_manager.machine_code}")
+#         print("\n请联系软件提供商获取有效的许可证文件。")
+#         print("需要提供上述机器码以生成对应的许可证。")
+#         print("=" * 60)
+#         input("\n按Enter键退出...")
+#         sys.exit(1)
+# 
+#     print("\n" + "=" * 60)
+#     print("【许可证验证成功】")
+#     print("=" * 60)
+#     print()
 
     # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)

@@ -14,6 +14,7 @@ import config
 from database import Database
 from image_detection import ImageChangeDetection
 from image_storage import ImageStorage
+from video_stream_reader import VideoStreamReader  # 独立线程读取器
 import av  # PyAV for RTSP with PTS support
 
 
@@ -69,6 +70,9 @@ class CameraMonitor:
 
         # OpenCV VideoCapture (for USB cameras or fallback)
         self.cap = None
+
+        # VideoStreamReader (独立线程读取器，解决缓冲区积压问题)
+        self.stream_reader = None
 
         # PyAV container and stream (for RTSP with PTS)
         self.av_container = None
@@ -274,8 +278,46 @@ class CameraMonitor:
                 last_detection_time = 0  # 上次背景检测的时间（控制检测频率）
 
                 # 开始监测循环
+                # 缓冲区清理策略：根据配置决定是否启用
+                use_stream_reader = self.config.get('use_video_stream_reader', False)
+                last_buffer_flush_time = time.time()
+                buffer_flush_interval = self.config.get('buffer_flush_interval', 30)
+                buffer_flush_max_frames = self.config.get('buffer_flush_max_frames', 100)
+
+                # 只在不使用VideoStreamReader时才显示清理配置
+                if not use_stream_reader and self.stream_reader is None:
+                    logger.info(
+                        f"\n{'='*60}\n"
+                        f"[{self.camera_name}] 缓冲区管理已启用（定期清理策略）\n"
+                        f"  - 定期清理间隔: {buffer_flush_interval}秒\n"
+                        f"  - 安全上限: {buffer_flush_max_frames}帧\n"
+                        f"  - YOLO后清理上限: {self.config.get('buffer_flush_after_yolo_frames', 50)}帧\n"
+                        f"  - 预计每{buffer_flush_interval}秒会看到一次清理日志\n"
+                        f"{'='*60}"
+                    )
+                else:
+                    logger.info(
+                        f"\n{'='*60}\n"
+                        f"[{self.camera_name}] 使用VideoStreamReader独立线程模式\n"
+                        f"  - 独立线程持续读取最新帧\n"
+                        f"  - 无需定期清理缓冲区\n"
+                        f"  - 实时性最高（<1ms延迟）\n"
+                        f"{'='*60}"
+                    )
+
                 while self.running:
                     try:
+                        # === 自适应缓冲区清理策略 ===
+                        # 仅在不使用VideoStreamReader时才执行定期清理
+                        if not use_stream_reader and self.stream_reader is None:
+                            current_time = time.time()
+                            if current_time - last_buffer_flush_time >= buffer_flush_interval:
+                                flushed = self._flush_buffer_smart(
+                                    max_frames=buffer_flush_max_frames,
+                                    reason="定期清理"
+                                )
+                                last_buffer_flush_time = current_time
+
                         # 持续读取帧，绝不阻塞！
                         ret, frame, frame_time = self._read_frame_with_pts()
 
@@ -355,9 +397,13 @@ class CameraMonitor:
                                 people_count_for_merge = self._count_people_in_frame(frame)
 
                                 # 🚀 关键优化：YOLO检测完成后立即清空缓冲区
-                                # 在YOLO执行的200-500ms期间，缓冲区积压了约5-12帧
-                                # 必须清空，否则延迟会累积
-                                self._flush_buffer_after_yolo(max_frames=20)
+                                # 仅在不使用VideoStreamReader时才需要清理
+                                # 因为VideoStreamReader的独立线程会自动处理缓冲区积压
+                                if not use_stream_reader and self.stream_reader is None:
+                                    # 在YOLO执行的200-500ms期间，缓冲区积压了约5-12帧
+                                    # 必须清空到底，否则延迟会累积
+                                    yolo_flush_frames = self.config.get('buffer_flush_after_yolo_frames', 50)
+                                    self._flush_buffer_after_yolo(max_frames=yolo_flush_frames)
 
                                 if people_count_for_merge is not None and people_count_for_merge <= 0:
                                     logger.info(
@@ -656,6 +702,27 @@ class CameraMonitor:
                     f"USB摄像头连接成功 - 摄像头: {self.camera_name} (设备ID: {usb_device_id}), "
                     f"成功读取 {success_count}/{test_frames} 测试帧"
                 )
+
+                # ============ 使用 VideoStreamReader 包装 VideoCapture ============
+                # 根据配置决定是否使用独立线程读取器
+                use_stream_reader = self.config.get('use_video_stream_reader', False)
+
+                if use_stream_reader:
+                    logger.info(
+                        f"[{self.camera_name}] 使用 VideoStreamReader 包装 USB 摄像头 - "
+                        f"独立线程持续读取最新帧，彻底解决缓冲区积压"
+                    )
+                    self.stream_reader = VideoStreamReader(
+                        self.cap,
+                        camera_name=self.camera_name,
+                        use_pyav=False
+                    )
+                else:
+                    logger.info(
+                        f"[{self.camera_name}] USB摄像头使用定期清理模式 - "
+                        f"每{self.config.get('buffer_flush_interval', 10)}秒清空缓冲区"
+                    )
+
                 return True
             else:
                 logger.error(
@@ -934,6 +1001,28 @@ class CameraMonitor:
                     )
                     self.use_pyav = False
 
+                # ============ 使用 VideoStreamReader 包装 VideoCapture ============
+                # 根据配置决定是否使用独立线程读取器
+                use_stream_reader = self.config.get('use_video_stream_reader', False)
+
+                if not self.use_pyav and self.cap is not None and use_stream_reader:
+                    logger.info(
+                        f"[{self.camera_name}] 使用 VideoStreamReader 包装 VideoCapture - "
+                        f"独立线程持续读取最新帧，彻底解决缓冲区积压"
+                    )
+                    # 用 VideoStreamReader 包装当前的 VideoCapture
+                    self.stream_reader = VideoStreamReader(
+                        self.cap,
+                        camera_name=self.camera_name,
+                        use_pyav=False
+                    )
+                    # 注意：VideoStreamReader 会接管 self.cap，不要再直接使用 self.cap.read()
+                elif not self.use_pyav and self.cap is not None and not use_stream_reader:
+                    logger.info(
+                        f"[{self.camera_name}] 使用定期清理模式 - "
+                        f"每{self.config.get('buffer_flush_interval', 10)}秒清空缓冲区"
+                    )
+
                 return True
             else:
                 logger.error(
@@ -961,6 +1050,15 @@ class CameraMonitor:
     
     def _release_capture(self):
         """释放视频捕获资源"""
+        # 先释放 VideoStreamReader（它会释放内部的 VideoCapture）
+        if self.stream_reader is not None:
+            try:
+                self.stream_reader.release()
+            except:
+                pass
+            self.stream_reader = None
+
+        # 如果 stream_reader 没有接管 cap，则手动释放 cap
         if self.cap is not None:
             try:
                 self.cap.release()
@@ -1239,7 +1337,20 @@ class CameraMonitor:
                 return False, None, None
         else:
             # 使用OpenCV读取（USB摄像头或fallback）
-            # 防御性检查：确保cap不是None
+            # 优先使用 VideoStreamReader（独立线程模式）
+            if self.stream_reader is not None:
+                try:
+                    ret, frame, frame_time = self.stream_reader.read()
+                    # stream_reader.read() 已经返回时间戳，直接使用
+                    return ret, frame, frame_time
+                except Exception as e:
+                    logger.error(
+                        f"VideoStreamReader读取帧失败 - 摄像头: {self.camera_name}, "
+                        f"错误: {e}"
+                    )
+                    return False, None, None
+
+            # 降级方案：直接从 VideoCapture 读取（不推荐，会有缓冲区积压）
             if self.cap is None:
                 logger.error(
                     f"OpenCV VideoCapture为空 - 摄像头: {self.camera_name}, "
@@ -1258,15 +1369,19 @@ class CameraMonitor:
                 )
                 return False, None, None
 
-    def _flush_buffer_after_yolo(self, max_frames: int = 20) -> int:
+    def _flush_buffer_after_yolo(self, max_frames: int = 50) -> int:
         """
-        YOLO检测后清空缓冲区，追上最新进度
+        YOLO检测后清空缓冲区到底，追上最新进度
 
         在主线程执行YOLO检测时（耗时200-500ms），视频流持续产生帧导致缓冲区积压。
-        此方法快速读取并丢弃缓冲区中的旧帧，确保后续使用最新数据。
+        此方法会持续grab()直到缓冲区为空，确保后续读取的是最新帧。
+
+        关键逻辑：
+        1. 持续调用grab()直到返回False（缓冲区空了）
+        2. max_frames作为安全上限，防止异常情况
 
         Args:
-            max_frames: 最多读取的帧数（防止无限循环）
+            max_frames: 安全上限（防止无限循环），默认50帧
 
         Returns:
             int: 清空的帧数
@@ -1275,11 +1390,12 @@ class CameraMonitor:
 
         try:
             if self.use_pyav and self.av_decoder is not None:
-                # PyAV 模式：快速消费解码器中的帧
+                # PyAV 模式：快速消费解码器中的帧，直到清空
                 for _ in range(max_frames):
                     try:
                         frame = next(self.av_decoder, None)
                         if frame is None:
+                            # 缓冲区已空
                             break
                         flushed_count += 1
                     except StopIteration:
@@ -1288,21 +1404,107 @@ class CameraMonitor:
                         break
 
             elif self.cap is not None and self.cap.isOpened():
-                # OpenCV 模式：快速读取并丢弃
+                # OpenCV 模式：快速读取并丢弃，直到清空
                 for _ in range(max_frames):
                     ret = self.cap.grab()  # grab() 比 read() 快，只解码不返回
                     if not ret:
+                        # 缓冲区已空
                         break
                     flushed_count += 1
 
             if flushed_count > 0:
-                logger.debug(
-                    f"[{self.camera_name}] YOLO检测后清空缓冲区，丢弃 {flushed_count} 帧旧数据 "
-                    f"(约 {flushed_count/25:.2f}秒延迟)"
-                )
+                if flushed_count >= max_frames:
+                    logger.warning(
+                        f"⚠️ [{self.camera_name}] YOLO检测后缓冲区清理已达上限 {max_frames} 帧 "
+                        f"(约 {flushed_count/25:.2f}秒延迟)，可能仍未清空！建议增加buffer_flush_after_yolo_frames"
+                    )
+                else:
+                    logger.debug(
+                        f"[{self.camera_name}] YOLO检测后清空缓冲区，丢弃 {flushed_count} 帧旧数据 "
+                        f"(约 {flushed_count/25:.2f}秒延迟) - 已清空"
+                    )
 
         except Exception as e:
             logger.warning(f"[{self.camera_name}] 清空缓冲区异常: {e}")
+
+        return flushed_count
+
+    def _flush_buffer_smart(self, max_frames: int = 100, reason: str = "智能清理") -> int:
+        """
+        智能缓冲区清理 - 清空到底，确保彻底清除积压
+
+        多摄像头场景下，缓冲区容易累积延迟。此方法会持续清空直到缓冲区为空，
+        确保 realtime 时间戳机制的准确性（datetime.now() 对应的是最新帧）。
+
+        关键逻辑：
+        1. 持续调用grab()直到返回False（缓冲区空了）
+        2. max_frames作为安全上限，防止异常情况下的死循环
+        3. 清空后，下一帧就是"最新鲜"的帧
+
+        Args:
+            max_frames: 安全上限（防止死循环），默认100帧（约4秒）
+            reason: 清理原因（用于日志）
+
+        Returns:
+            int: 实际清空的帧数
+        """
+        flushed_count = 0
+
+        try:
+            if self.use_pyav and self.av_decoder is not None:
+                # PyAV 模式：快速消费解码器中的帧，直到清空
+                for _ in range(max_frames):
+                    try:
+                        frame = next(self.av_decoder, None)
+                        if frame is None:
+                            # 缓冲区已空
+                            break
+                        flushed_count += 1
+                    except StopIteration:
+                        # 流结束或缓冲区已空
+                        break
+                    except Exception:
+                        break
+
+            elif self.cap is not None and self.cap.isOpened():
+                # OpenCV 模式：使用grab()快速跳过，直到清空
+                for _ in range(max_frames):
+                    ret = self.cap.grab()  # grab() 只解码不返回，速度极快
+                    if not ret:
+                        # 缓冲区已空，停止清理
+                        break
+                    flushed_count += 1
+
+            # 根据清理结果给出不同的日志
+            if flushed_count > 0:
+                # 计算延迟时间（假设25fps）
+                delay_seconds = flushed_count / 25.0
+
+                # 如果清理了很多帧，说明积压严重，需要警告
+                if flushed_count >= max_frames:
+                    logger.warning(
+                        f"⚠️ [{self.camera_name}] 缓冲区严重积压！{reason}已达上限 {max_frames} 帧 "
+                        f"(约 {delay_seconds:.2f}秒延迟)，可能仍未清空！"
+                        f"建议：1)减少定期清理间隔 2)增加max_frames上限"
+                    )
+                elif flushed_count > 30:
+                    # 积压超过1秒，给出提示
+                    logger.warning(
+                        f"⚠️ [{self.camera_name}] 缓冲区积压较多！{reason}丢弃 {flushed_count} 帧 "
+                        f"(约 {delay_seconds:.2f}秒延迟) - 已清空，下一帧即最新"
+                    )
+                else:
+                    # 正常清理
+                    logger.info(
+                        f"✓ [{self.camera_name}] {reason}丢弃 {flushed_count} 帧 "
+                        f"(约 {delay_seconds:.2f}秒延迟) - 缓冲区已清空，realtime时间戳准确"
+                    )
+            else:
+                # 缓冲区无积压，也输出INFO级别日志（方便观察清理是否在工作）
+                logger.info(f"✓ [{self.camera_name}] {reason}，缓冲区无积压（理想状态）- 清理机制正常工作")
+
+        except Exception as e:
+            logger.warning(f"[{self.camera_name}] 智能缓冲区清理异常: {e}")
 
         return flushed_count
 

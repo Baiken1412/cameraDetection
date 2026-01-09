@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 数据库配置
 DATABASE_CONFIG = {
-    'host': '127.0.0.1',   # 或 'localhost'
+    'host': 'localhost',
     'port': 3306,
     'user': 'root',
     'password': '1412',
@@ -39,7 +39,38 @@ RTSP_MONITOR_CONFIG = {
 
     # 是否启用时间诊断日志（用于调试）
     'enable_time_diagnosis': True,
-    
+
+    # ==================== 缓冲区管理配置 ====================
+    # 是否启用独立线程读取模式（VideoStreamReader）
+    # true: 每个摄像头独立线程持续读取，实时性最高，但CPU占用增加50%
+    # false: 使用定期清理模式，CPU占用低，实时性稍差
+    # 建议：
+    #   - 摄像头数量 <= 5：启用（true）- 实时性优先
+    #   - 摄像头数量 > 5：禁用（false）- 性能优先
+    'use_video_stream_reader': True,  # 改为False，使用简单的定期清理方案
+
+    # 智能缓冲区清理间隔（秒）- 仅当 use_video_stream_reader=False 时生效
+    # 多摄像头场景下，定期清空缓冲区可避免时间错位
+    # 建议值：
+    #   - 10秒：高实时性要求场景（强制时间同步）
+    #   - 20秒：平衡模式（默认，适合大多数场景）
+    #   - 30秒：人员稀少场景
+    # 注意：USB摄像头可以设置更长间隔（缓冲区积压少）
+    'buffer_flush_interval': 10,  # 改为10秒，更频繁清理
+
+    # 智能清理的安全上限（帧数）
+    # 注意：这是**安全上限**，不是目标值！
+    # 实际清理会持续grab()直到缓冲区为空，max_frames只是防止死循环
+    # 建议值：100-200帧（25fps下约4-8秒）
+    # 如果日志显示"已达上限"警告，说明积压严重，需要增加此值或缩短清理间隔
+    'buffer_flush_max_frames': 150,  # 增加到150帧，防止"已达上限"警告
+
+    # YOLO检测后清理的安全上限（帧数）
+    # YOLO耗时200-500ms，期间积压约5-12帧
+    # 但为了安全起见，设置更大的上限
+    # 建议值：50-100帧
+    'buffer_flush_after_yolo_frames': 100,  # 增加到100帧，确保彻底清空
+
     # 重连间隔（秒）
     'reconnect_interval': 5,
     
@@ -47,7 +78,7 @@ RTSP_MONITOR_CONFIG = {
     'max_reconnect_attempts': 3,
     
     # 图片保存路径（本地文件系统路径，绝对路径）
-    'image_save_path': 'D:/ruoyi/uploadPath/caseapp',  # 例如: 'D:/ruoyi/uploadPath/caseapp'
+    'image_save_path': 'D:/appdata/uploadPath/caseapp',  # 例如: 'D:/ruoyi/uploadPath/caseapp'
 
     # 图片访问URL前缀（用于存储到数据库的URL路径）
     # 本地开发环境：使用localhost + Java服务端口8090（HTTPS）

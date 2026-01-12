@@ -10,7 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from loguru import logger
-import config
+import config_loader as config
 from utils.image_processor import load_image
 
 # 直接使用本地模块（不再依赖外部路径）

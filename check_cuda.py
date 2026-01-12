@@ -52,7 +52,7 @@ def check_cuda_environment():
     print("\n[2/5] 检查项目配置...")
     try:
         sys.path.insert(0, str(Path(__file__).parent))
-        import config
+        import config_loader as config
 
         device_config = config.REID_CONFIG.get('device', 'cpu')
         print(f"配置文件中的设备: {device_config}")

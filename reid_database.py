@@ -5,7 +5,7 @@ ReID数据库操作模块（多数据源支持）
 import sys
 from pathlib import Path
 from loguru import logger
-import config
+import config_loader as config
 
 # ReID系统已整合到caseapp项目中
 # 优先使用本地模块（reid_database_modu），如果不存在则尝试外部路径（向后兼容）

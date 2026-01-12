@@ -6,7 +6,12 @@
       "Bash(pip show:*)",
       "Bash(pip install:*)",
       "Bash(copy:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(pyinstaller:*)",
+      "Bash(git checkout:*)",
+      "Bash(powershell -Command \"Remove-Item -Path ''dist'' -Recurse -Force\")",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)"
     ]
   }
 }

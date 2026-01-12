@@ -6,7 +6,7 @@ from dbutils.pooled_db import PooledDB
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from loguru import logger
-import config
+import config_loader as config
 import requests
 
 

@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
-import config
+import config_loader as config
 from utils.image_processor import save_image as cv2_save_image
 
 

@@ -5,7 +5,7 @@
 import cv2
 import numpy as np
 from loguru import logger
-import config
+import config_loader as config
 
 
 class ImageChangeDetection:

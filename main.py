@@ -6,7 +6,7 @@ import signal
 import sys
 import time
 from loguru import logger
-import config
+import config_loader as config
 from database import Database
 from camera_monitor import CameraMonitor
 from license_manager import LicenseManager

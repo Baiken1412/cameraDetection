@@ -11,7 +11,7 @@ from flask import Flask, render_template, request, jsonify, send_from_directory
 from loguru import logger
 
 # 导入 caseapp 的配置
-import config as caseapp_config
+import config_loader as caseapp_config
 
 # 注意：必须在添加 ReID 系统路径之前导入 caseapp 的 database 模块
 # 否则 Python 会从 ReID 系统的 database 模块导入

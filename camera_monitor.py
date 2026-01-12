@@ -10,7 +10,7 @@ import queue
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 from loguru import logger
-import config
+import config_loader as config
 from database import Database
 from image_detection import ImageChangeDetection
 from image_storage import ImageStorage
@@ -765,9 +765,9 @@ class CameraMonitor:
                     f"(第 {round_idx + 1}/2 轮)"
                 )
                 
-                # 尝试连接，首先使用TCP传输
+                # 使用TCP传输
                 connection_success = False
-                transport_methods = ['tcp', 'udp']  # 先尝试TCP，失败后尝试UDP
+                transport_methods = ['tcp']
                 
                 for url_variant in alternative_urls:
                     if connection_success:
@@ -1196,16 +1196,17 @@ class CameraMonitor:
 
             # 打开RTSP流
             logger.debug(f"正在使用PyAV打开RTSP流: {self.camera_name}")
+            # [camera_monitor.py]
             self.av_container = av.open(
-                self.rtsp_url,
-                options={
-                    'rtsp_transport': 'tcp',  # 使用TCP传输（更可靠）
-                    'max_delay': '500000',  # 最大延迟500ms
-                    'stimeout': '5000000',  # 套接字超时5秒
-                    'buffer_size': '1024000',  # 缓冲区大小1MB
-                    'rtsp_flags': 'prefer_tcp',  # 优先使用TCP
-                },
-                timeout=10.0  # 连接超时10秒
+            self.rtsp_url,
+            options={
+                'rtsp_transport': 'tcp',
+                'max_delay': '3000000',     # [修改] 从 500000 改为 3000000 (3秒)，允许更大的网络抖动
+                'stimeout': '10000000',     # [修改] socket超时增加到 10秒
+                'buffer_size': '10240000',  # [修改] 接收缓冲区从 1MB 增加到 10MB
+                'rtsp_flags': 'prefer_tcp',
+            },
+            timeout=20.0  # [修改] 连接超时增加到 20秒
             )
 
             # 获取视频流

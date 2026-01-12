@@ -9,7 +9,7 @@ import torch
 
 # 导入 caseapp 的配置
 sys.path.insert(0, str(Path(__file__).parent))
-import config as caseapp_config
+import config_loader as caseapp_config
 
 
 class ReIDConfigAdapter:

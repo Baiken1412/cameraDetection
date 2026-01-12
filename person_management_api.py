@@ -17,7 +17,7 @@ sys.path.insert(0, str(caseapp_dir))
 import database as caseapp_database
 from database import Database
 from reid_integration import ReIDIntegration, REID_AVAILABLE as REID_INTEGRATION_AVAILABLE, REID_IMPORT_ERROR
-import config as caseapp_config
+import config_loader as caseapp_config
 
 # 创建Flask应用
 app = Flask(__name__, 

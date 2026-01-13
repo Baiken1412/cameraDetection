@@ -275,15 +275,19 @@ class Database:
             return None
 
         sql = """
-            INSERT INTO app_track (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO app_track (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         try:
             with conn.cursor() as cursor:
                 jssj = pssj + timedelta(seconds=5)
                 jscs = 1  # 初始检测次数为1
-                cursor.execute(sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs))
+                bzzt = '0'  # 默认为待标注状态
+                track_duration = 5  # 初始轨迹时长为5秒
+                long_track_threshold = config.RTSP_MONITOR_CONFIG.get('long_track_threshold', 60)
+                is_long_track = 1 if track_duration >= long_track_threshold else 0
+                cursor.execute(sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track))
                 record_id = cursor.lastrowid
                 
                 logger.info(f"保存监测记录成功 - 摄像头: {sxtmx} (ID: {qyid}), 区域: {qymc}, 记录ID: {record_id}, 时间: {pssj}")
@@ -568,21 +572,33 @@ class Database:
 
     def update_trajectory_detection(self, record_id: int, jscs: int, jssj: datetime, rysl: int = None) -> bool:
         """
-        更新轨迹记录的检测次数、结束时间和人员数量
+        更新轨迹记录的检测次数、结束时间、人员数量、轨迹时长和长轨迹标记
         """
         conn = self._get_conn()
         if not conn:
             return False
         try:
             with conn.cursor() as cursor:
+                # 先获取开始时间以计算轨迹时长
+                cursor.execute("SELECT pssj FROM app_track WHERE id = %s", (record_id,))
+                row = cursor.fetchone()
+                if not row:
+                    logger.error(f"未找到轨迹记录 - 记录ID: {record_id}")
+                    return False
+
+                pssj = row['pssj']
+                track_duration = int((jssj - pssj).total_seconds())
+                long_track_threshold = config.RTSP_MONITOR_CONFIG.get('long_track_threshold', 60)
+                is_long_track = 1 if track_duration >= long_track_threshold else 0
+
                 if rysl is not None:
-                    sql = "UPDATE app_track SET jscs = %s, jssj = %s, rysl = GREATEST(COALESCE(rysl, 0), %s) WHERE id = %s"
-                    cursor.execute(sql, (jscs, jssj, rysl, record_id))
-                    logger.info(f"更新轨迹检测次数成功 - 记录ID: {record_id}, 检测次数: {jscs}, 结束时间: {jssj}, 人员数量: {rysl}")
+                    sql = "UPDATE app_track SET jscs = %s, jssj = %s, rysl = GREATEST(COALESCE(rysl, 0), %s), track_duration = %s, is_long_track = %s WHERE id = %s"
+                    cursor.execute(sql, (jscs, jssj, rysl, track_duration, is_long_track, record_id))
+                    logger.info(f"更新轨迹检测次数成功 - 记录ID: {record_id}, 检测次数: {jscs}, 结束时间: {jssj}, 人员数量: {rysl}, 轨迹时长: {track_duration}秒, 长轨迹: {is_long_track}")
                 else:
-                    sql = "UPDATE app_track SET jscs = %s, jssj = %s WHERE id = %s"
-                    cursor.execute(sql, (jscs, jssj, record_id))
-                    logger.info(f"更新轨迹检测次数成功 - 记录ID: {record_id}, 检测次数: {jscs}, 结束时间: {jssj}")
+                    sql = "UPDATE app_track SET jscs = %s, jssj = %s, track_duration = %s, is_long_track = %s WHERE id = %s"
+                    cursor.execute(sql, (jscs, jssj, track_duration, is_long_track, record_id))
+                    logger.info(f"更新轨迹检测次数成功 - 记录ID: {record_id}, 检测次数: {jscs}, 结束时间: {jssj}, 轨迹时长: {track_duration}秒, 长轨迹: {is_long_track}")
                 return True
         except Exception as e:
             logger.error(f"更新轨迹检测次数失败 - 记录ID: {record_id}: {e}")

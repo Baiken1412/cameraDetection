@@ -156,6 +156,7 @@ class VideoStreamReader:
                             self.total_read_count = 0
                             self.total_drop_count = 0
                             self.last_stats_log_time = current_time
+                    time.sleep(0.015)
                 else:
                     # 读取失败
                     consecutive_failures += 1

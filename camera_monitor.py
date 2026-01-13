@@ -392,6 +392,32 @@ class CameraMonitor:
                                 )
                             
                             if has_change:
+                            # ==================== 1. 新增：坏帧/花屏过滤器 ====================
+                            # POC报错会导致解码出全黑、全绿或全灰的纯色图片，这些会被误判为"剧烈运动"
+                            # 正常摄像头的画面是有纹理的，标准差(std)通常较高
+                            # 坏帧通常是纯色，标准差极低 (<10)
+                                try:
+                                    import numpy as np
+                                    if frame is None or frame.size == 0:
+                                        continue
+                                    
+                                    # 计算均值和标准差
+                                    frame_mean = np.mean(frame)
+                                    frame_std = np.std(frame)
+                                    
+                                    # 规则1: 极暗(黑屏)或极亮(白屏)
+                                    if frame_mean < 10 or frame_mean > 245:
+                                        logger.warning(f"检测到异常坏帧(纯色)，均值:{frame_mean:.1f}，跳过 - {self.camera_name}")
+                                        continue
+                                        
+                                    # 规则2: 画面太平坦(全绿/全灰花屏)，正常画面std至少>20
+                                    if frame_std < 10:
+                                        logger.warning(f"检测到异常坏帧(无纹理)，标准差:{frame_std:.1f}，跳过 - {self.camera_name}")
+                                        continue
+                                except Exception as e:
+                                    logger.error(f"坏帧检测出错: {e}")
+                                # ================================================================
+
                                 logger.info(
                                     f"✓ [{self.camera_name}] 检测到画面变化！"
                                     f" 前景比例: {change_percent:.3f}% (阈值: {threshold_percent:.3f}%, "
@@ -405,19 +431,28 @@ class CameraMonitor:
                                 people_count_for_merge = self._count_people_in_frame(frame)
 
                                 # 🚀 关键优化：YOLO检测完成后立即清空缓冲区
-                                # 仅在不使用VideoStreamReader时才需要清理
-                                # 因为VideoStreamReader的独立线程会自动处理缓冲区积压
                                 if not use_stream_reader and self.stream_reader is None:
-                                    # 在YOLO执行的200-500ms期间，缓冲区积压了约5-12帧
-                                    # 必须清空到底，否则延迟会累积
                                     yolo_flush_frames = self.config.get('buffer_flush_after_yolo_frames', 50)
                                     self._flush_buffer_after_yolo(max_frames=yolo_flush_frames)
 
-                                if people_count_for_merge is not None and people_count_for_merge <= 0:
-                                    logger.info(
-                                        f"YOLO核实当前帧无人员，本次变化视为非人员事件，"
-                                        f"不保存/合并记录 - 摄像头: {self.camera_name}"
-                                    )
+                                # ==================== 2. 修正：严格的 YOLO 校验逻辑 ====================
+                                # 原代码: if people_count_for_merge is not None and people_count_for_merge <= 0:
+                                # 致命问题: 当 YOLO 因为花屏报错返回 None 时，原代码会跳过 continue，导致"默认保存"
+                                
+                                # 新逻辑: 只要不是"明确有人"，一律跳过 (默认拒绝)
+                                if people_count_for_merge is None or people_count_for_merge <= 0:
+                                    if people_count_for_merge is None:
+                                        # YOLO 没跑通（通常是因为花屏帧导致推理失败）
+                                        logger.warning(
+                                            f"YOLO检测异常(可能因花屏/坏帧)，为防止误报，跳过本次保存 - {self.camera_name}"
+                                        )
+                                    else:
+                                        # YOLO 跑通了，确实没人
+                                        logger.info(
+                                            f"YOLO核实当前帧无人员(0人)，本次变化视为非人员事件，"
+                                            f"不保存/合并记录 - 摄像头: {self.camera_name}"
+                                        )
+                                    
                                     # 重置连续帧计数，让后续检测重新开始
                                     self.detection.consecutive_change_count = 0
 
@@ -434,12 +469,11 @@ class CameraMonitor:
                                             self.detection_mode = 'fast'
                                             self.no_person_count = 0
                                             logger.info(
-                                                f"🔄 [{self.camera_name}] 连续{self.no_person_threshold}次未检测到人 "
-                                                f"(约{self.no_person_threshold * self.slow_mode_interval / 60:.1f}分钟)，"
+                                                f"🔄 [{self.camera_name}] 连续{self.no_person_threshold}次未检测到人，"
                                                 f"切换到快速检测模式"
                                             )
 
-                                    continue  # 继续监测循环，不断开、不等待
+                                    continue  # 🚀 关键：遇到坏帧或无人，跳过保存，继续下一次循环
 
                                 # YOLO确认有人，检查冷却时间（避免同一人频繁保存）
                                 current_time = time.time()
@@ -681,7 +715,7 @@ class CameraMonitor:
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 # 设置缓冲区大小
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
             except Exception as e:
                 logger.debug(f"设置USB摄像头参数失败（将使用默认参数）: {e}")
 
@@ -819,7 +853,7 @@ class CameraMonitor:
                             # 设置RTSP相关属性，提高连接稳定性
                             try:
                                 # 设置缓冲区大小（减少延迟）
-                                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
                                 # 设置超时时间（增加到10秒）
                                 self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
                                 self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
@@ -944,7 +978,7 @@ class CameraMonitor:
             
             # 设置缓冲区大小（减少延迟，但可能增加丢帧）
             try:
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
             except (AttributeError, cv2.error):
                 logger.debug(f"无法设置缓冲区大小: {self.camera_name}")
             

@@ -43,7 +43,8 @@
     "enable_usb_camera": true,
     "usb_camera_id": 0,
     "usb_camera_name": "USB摄像头",
-    "usb_camera_area": "USB监控区域"
+    "usb_camera_area": "USB监控区域",
+    "long_track_threshold": 60
   },
   "REID_CONFIG": {
     "enabled": false,

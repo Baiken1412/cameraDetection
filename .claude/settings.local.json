@@ -12,7 +12,8 @@
       "Bash(powershell -Command \"Remove-Item -Path ''dist'' -Recurse -Force\")",
       "Bash(tasklist:*)",
       "Bash(findstr:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(mysql:*)"
     ]
   }
 }

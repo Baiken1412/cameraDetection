@@ -18,13 +18,15 @@ class RtspMonitorSystem:
     def __init__(self):
         self.db = Database()
         self.monitors = {}  # 存储每个摄像头的监测对象
+        self.yolo_pools = {}  # YOLO实例池字典: {pool_id: YoloDetectorPool}
+        self.default_yolo_pool = None  # 默认全局YOLO池（用于yolo_pool_id=NULL的摄像头）
         self.running = False
     
     def initialize(self):
         """初始化系统"""
         # 确保目录存在
         config.ensure_directories()
-        
+
         # 配置日志
         logger.add(
             config.LOG_CONFIG['file'],
@@ -33,41 +35,123 @@ class RtspMonitorSystem:
             rotation=config.LOG_CONFIG['rotation'],
             retention=config.LOG_CONFIG['retention']
         )
-        
+
         # 连接数据库
         if not self.db.connect():
             logger.error("数据库连接失败，系统无法启动")
             return False
-        
+
         logger.info("========== RTSP监测系统初始化完成（使用背景建模检测） ==========")
         return True
     
     def start_all_monitors(self):
         """启动所有摄像头监测"""
         logger.info("========== 开始启动RTSP监测服务 ==========")
-        
+
         # 查询所有有效的摄像头
         cameras = self.db.get_all_cameras()
-        
+
         if not cameras:
             logger.warning("未找到有效的摄像头配置")
             return
-        
+
         logger.info(f"找到 {len(cameras)} 个有效摄像头，开始启动监测...")
-        
-        # 为每个摄像头启动监测
+
+        # ==================== 步骤1：分析摄像头配置，创建所需的YOLO池 ====================
+        pool_ids_needed = set()  # 需要创建的池ID集合
+        need_default_pool = False  # 是否需要默认全局池
+
+        for camera in cameras:
+            pool_id = camera.get('yolo_pool_id')
+
+            if pool_id is None or pool_id == -1:
+                # NULL或-1 → 使用默认全局池
+                need_default_pool = True
+            elif pool_id > 0:
+                # 正整数 → 使用指定的池
+                pool_ids_needed.add(pool_id)
+            # pool_id == 0 → 独立实例，不需要创建池
+
+        logger.info(
+            f"YOLO池配置分析: 需要创建池ID={sorted(pool_ids_needed)}, "
+            f"需要默认池={need_default_pool}"
+        )
+
+        # 创建所需的YOLO池
+        try:
+            from core.yolo_pool import YoloDetectorPool
+
+            # 准备检测器配置
+            if config.YOLO_POOL_CONFIG.get('detector_type', 'adaptive') == 'adaptive':
+                detector_config = config.ADAPTIVE_DETECTION_CONFIG.copy()
+            else:
+                detector_config = {
+                    'model_path': getattr(config, 'YOLO_MODEL_PATH', None),
+                    'device': getattr(config, 'DEVICE', 'auto'),
+                    'conf_threshold': config.ADAPTIVE_DETECTION_CONFIG.get('conf_threshold', 0.5),
+                    'iou_threshold': config.ADAPTIVE_DETECTION_CONFIG.get('iou_threshold', 0.4)
+                }
+
+            # 创建默认全局池（如果需要且配置启用）
+            if need_default_pool and config.YOLO_POOL_CONFIG.get('enabled', False):
+                self.default_yolo_pool = YoloDetectorPool(
+                    pool_size=config.YOLO_POOL_CONFIG.get('pool_size', 2),
+                    detector_type=config.YOLO_POOL_CONFIG.get('detector_type', 'adaptive'),
+                    detector_config=detector_config
+                )
+                logger.info(f"已创建默认YOLO池: {self.default_yolo_pool}")
+
+            # 创建指定的池（每个池默认1个实例，表示"共享"）
+            for pool_id in pool_ids_needed:
+                pool = YoloDetectorPool(
+                    pool_size=1,  # 每个自定义池默认1个实例
+                    detector_type=config.YOLO_POOL_CONFIG.get('detector_type', 'adaptive'),
+                    detector_config=detector_config
+                )
+                self.yolo_pools[pool_id] = pool
+                logger.info(f"已创建YOLO池 ID={pool_id}: {pool}")
+
+        except Exception as e:
+            logger.error(f"创建YOLO池失败: {e}")
+            logger.warning("将回退到每个摄像头独立创建YOLO实例的模式")
+
+        # ==================== 步骤2：为每个摄像头分配池并启动监测 ====================
         for camera in cameras:
             try:
-                monitor = CameraMonitor(camera, self.db)
+                pool_id = camera.get('yolo_pool_id')
+
+                # 根据pool_id选择对应的池
+                if pool_id is None or pool_id == -1:
+                    yolo_pool = self.default_yolo_pool
+                    pool_desc = "默认全局池"
+                elif pool_id == 0:
+                    yolo_pool = None
+                    pool_desc = "独立实例"
+                elif pool_id > 0:
+                    yolo_pool = self.yolo_pools.get(pool_id)
+                    pool_desc = f"池{pool_id}"
+                else:
+                    yolo_pool = None
+                    pool_desc = "未知配置，使用独立实例"
+                    logger.warning(
+                        f"摄像头 {camera.get('fjmc')} 的 yolo_pool_id={pool_id} 无效"
+                    )
+
+                logger.info(
+                    f"摄像头 {camera.get('fjmc')} (ID: {camera['id']}) "
+                    f"使用YOLO配置: {pool_desc}"
+                )
+
+                monitor = CameraMonitor(camera, self.db, yolo_pool=yolo_pool)
                 monitor.start()
                 self.monitors[camera['id']] = monitor
-                
+
                 # 避免同时启动过多连接，稍作延迟
                 time.sleep(1)
-                
+
             except Exception as e:
                 logger.error(f"启动摄像头 {camera.get('fjmc', 'Unknown')} 监测失败: {e}")
-        
+
         logger.info("========== RTSP监测服务启动完成 ==========")
         self.running = True
     
@@ -98,6 +182,24 @@ class RtspMonitorSystem:
         """关闭系统"""
         logger.info("正在关闭系统...")
         self.stop_all_monitors()
+
+        # 关闭所有YOLO实例池
+        if self.default_yolo_pool is not None:
+            try:
+                self.default_yolo_pool.shutdown()
+                logger.info("默认YOLO实例池已关闭")
+            except Exception as e:
+                logger.error(f"关闭默认YOLO实例池失败: {e}")
+
+        for pool_id, pool in self.yolo_pools.items():
+            try:
+                pool.shutdown()
+                logger.info(f"YOLO池 {pool_id} 已关闭")
+            except Exception as e:
+                logger.error(f"关闭YOLO池 {pool_id} 失败: {e}")
+
+        self.yolo_pools.clear()
+
         self.db.close()
         logger.info("系统已关闭")
 

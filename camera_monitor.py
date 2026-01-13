@@ -21,13 +21,14 @@ import av  # PyAV for RTSP with PTS support
 class CameraMonitor:
     """单个摄像头监测类"""
     
-    def __init__(self, camera_info: dict, db: Database):
+    def __init__(self, camera_info: dict, db: Database, yolo_pool=None):
         """
         初始化摄像头监测
-        
+
         Args:
             camera_info: 摄像头配置信息
             db: 数据库连接对象
+            yolo_pool: YOLO实例池（可选）。如果提供，则使用共享池；否则创建独立实例
         """
         self.camera_info = camera_info
         self.camera_id = camera_info['id']
@@ -50,12 +51,19 @@ class CameraMonitor:
                 logger.error(f"摄像头 {self.camera_name} RTSP URL为空！")
             elif 'rtsp://' not in self.rtsp_url.lower():
                 logger.warning(f"摄像头 {self.camera_name} RTSP URL格式可能不正确: {self.rtsp_url[:100]}")
-        
+
         self.db = db
         self.detection = ImageChangeDetection()
         self.storage = ImageStorage()
-        # YOLO 人员检测器（懒加载）
-        self.person_detector = None
+
+        # YOLO检测方式：使用共享池或独立实例
+        self.yolo_pool = yolo_pool  # 共享YOLO实例池（如果启用）
+        self.person_detector = None  # 独立YOLO实例（如果未使用池）
+
+        if self.yolo_pool:
+            logger.info(f"摄像头 {self.camera_name} 将使用共享YOLO实例池")
+        else:
+            logger.info(f"摄像头 {self.camera_name} 将创建独立YOLO实例")
         
         self.config = config.RTSP_MONITOR_CONFIG
         self.running = False
@@ -1612,80 +1620,108 @@ class CameraMonitor:
             # 1. 先在内存中进行YOLO检测（避免无效的磁盘I/O）
             people_count = None
             try:
-                # 懒加载 YOLO 检测器（避免每次都重新加载模型）
-                if self.person_detector is None:
+                # 方式1：使用共享YOLO实例池
+                if self.yolo_pool is not None:
                     try:
-                        # 优先使用自适应检测器（YOLOv11 + CPU优化）
-                        if config.ADAPTIVE_DETECTION_CONFIG.get('enabled', False):
-                            from core.person_detector_adaptive import AdaptivePersonDetector
-                            self.person_detector = AdaptivePersonDetector(
-                                model_dir=config.ADAPTIVE_DETECTION_CONFIG['model_dir'],
-                                conf_threshold=config.ADAPTIVE_DETECTION_CONFIG['conf_threshold'],
-                                iou_threshold=config.ADAPTIVE_DETECTION_CONFIG['iou_threshold'],
-                                force_engine=config.ADAPTIVE_DETECTION_CONFIG.get('force_engine'),
-                                num_threads=config.ADAPTIVE_DETECTION_CONFIG.get('num_threads')
-                            )
-                            logger.info(
-                                f"自适应人员检测器已初始化（YOLOv11）- 摄像头: {self.camera_name} (ID: {self.camera_id}), "
-                                f"引擎: {self.person_detector.engine.value}"
-                            )
-                        else:
-                            # 传统方式（兼容性）
-                            from core.detector import PersonDetector
-                            self.person_detector = PersonDetector()
-                            logger.info(
-                                f"YOLO人员检测器已初始化 - 摄像头: {self.camera_name} (ID: {self.camera_id})"
-                            )
-                    except Exception as det_init_err:
-                        logger.error(
-                            f"初始化YOLO人员检测器失败，跳过人数检测: {det_init_err}",
-                            exc_info=True,
-                        )
-                        self.person_detector = None
-
-                # 直接在内存中检测（不需要先保存到硬盘）
-                if self.person_detector is not None:
-                    # 根据检测器类型选择检测方法
-                    if hasattr(self.person_detector, 'detect_image'):
-                        # 自适应检测器（YOLOv11）- 直接传入frame
-                        detections = self.person_detector.detect_image(frame)
-                    elif hasattr(self.person_detector, 'get_person_count'):
-                        # 某些检测器可能有get_person_count方法
-                        people_count = self.person_detector.get_person_count(frame)
-                        detections = [{}] * people_count if people_count > 0 else []
-                    else:
-                        # 传统YOLO检测器 - 使用model.predict
-                        results = self.person_detector.model.predict(
+                        detections = self.yolo_pool.detect(
                             frame,
-                            conf=self.person_detector.conf_threshold,
-                            iou=self.person_detector.iou_threshold,
-                            classes=[0],  # 只检测人
-                            device=self.person_detector.device,
-                            verbose=False,
+                            timeout=config.YOLO_POOL_CONFIG.get('timeout', 30)
                         )
-                        if results:
-                            boxes = results[0].boxes
-                            detections = [{}] * len(boxes) if boxes is not None else []
+                        people_count = len(detections)
+                        logger.info(
+                            f"✓ YOLO池检测结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), "
+                            f"人数: {people_count}"
+                        )
+
+                        # 如果没有检测到人，直接返回，不保存任何文件
+                        if people_count <= 0:
+                            logger.debug(
+                                f"YOLO未检测到人员，跳过保存 - 摄像头: {self.camera_name}"
+                            )
+                            return
+
+                    except Exception as pool_err:
+                        logger.error(
+                            f"使用YOLO池检测失败 - 摄像头: {self.camera_name}, 错误: {pool_err}"
+                        )
+                        people_count = None
+
+                # 方式2：使用独立YOLO实例（向后兼容）
+                elif self.person_detector is not None or self.yolo_pool is None:
+                    # 懒加载 YOLO 检测器（避免每次都重新加载模型）
+                    if self.person_detector is None:
+                        try:
+                            # 优先使用自适应检测器（YOLOv11 + CPU优化）
+                            if config.ADAPTIVE_DETECTION_CONFIG.get('enabled', False):
+                                from core.person_detector_adaptive import AdaptivePersonDetector
+                                self.person_detector = AdaptivePersonDetector(
+                                    model_dir=config.ADAPTIVE_DETECTION_CONFIG['model_dir'],
+                                    conf_threshold=config.ADAPTIVE_DETECTION_CONFIG['conf_threshold'],
+                                    iou_threshold=config.ADAPTIVE_DETECTION_CONFIG['iou_threshold'],
+                                    force_engine=config.ADAPTIVE_DETECTION_CONFIG.get('force_engine'),
+                                    num_threads=config.ADAPTIVE_DETECTION_CONFIG.get('num_threads')
+                                )
+                                logger.info(
+                                    f"自适应人员检测器已初始化（YOLOv11）- 摄像头: {self.camera_name} (ID: {self.camera_id}), "
+                                    f"引擎: {self.person_detector.engine.value}"
+                                )
+                            else:
+                                # 传统方式（兼容性）
+                                from core.detector import PersonDetector
+                                self.person_detector = PersonDetector()
+                                logger.info(
+                                    f"YOLO人员检测器已初始化 - 摄像头: {self.camera_name} (ID: {self.camera_id})"
+                                )
+                        except Exception as det_init_err:
+                            logger.error(
+                                f"初始化YOLO人员检测器失败，跳过人数检测: {det_init_err}",
+                                exc_info=True,
+                            )
+                            self.person_detector = None
+
+                    # 直接在内存中检测（不需要先保存到硬盘）
+                    if self.person_detector is not None:
+                        # 根据检测器类型选择检测方法
+                        if hasattr(self.person_detector, 'detect_image'):
+                            # 自适应检测器（YOLOv11）- 直接传入frame
+                            detections = self.person_detector.detect_image(frame)
+                        elif hasattr(self.person_detector, 'get_person_count'):
+                            # 某些检测器可能有get_person_count方法
+                            people_count = self.person_detector.get_person_count(frame)
+                            detections = [{}] * people_count if people_count > 0 else []
                         else:
-                            detections = []
+                            # 传统YOLO检测器 - 使用model.predict
+                            results = self.person_detector.model.predict(
+                                frame,
+                                conf=self.person_detector.conf_threshold,
+                                iou=self.person_detector.iou_threshold,
+                                classes=[0],  # 只检测人
+                                device=self.person_detector.device,
+                                verbose=False,
+                            )
+                            if results:
+                                boxes = results[0].boxes
+                                detections = [{}] * len(boxes) if boxes is not None else []
+                            else:
+                                detections = []
 
-                    people_count = len(detections)
-                    logger.info(
-                        f"✓ 内存YOLO检测结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), "
-                        f"人数: {people_count}"
-                    )
-
-                    # 如果没有检测到人，直接返回，不保存任何文件
-                    if people_count <= 0:
-                        logger.debug(
-                            f"YOLO未检测到人员，跳过保存 - 摄像头: {self.camera_name}"
+                        people_count = len(detections)
+                        logger.info(
+                            f"✓ 内存YOLO检测结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), "
+                            f"人数: {people_count}"
                         )
-                        return
-                else:
-                    logger.warning(
-                        f"YOLO检测器不可用，无法统计人数，将继续保存记录但不写入人数字段 - 摄像头: {self.camera_name}"
-                    )
-                    people_count = None
+
+                        # 如果没有检测到人，直接返回，不保存任何文件
+                        if people_count <= 0:
+                            logger.debug(
+                                f"YOLO未检测到人员，跳过保存 - 摄像头: {self.camera_name}"
+                            )
+                            return
+                    else:
+                        logger.warning(
+                            f"YOLO检测器不可用，无法统计人数，将继续保存记录但不写入人数字段 - 摄像头: {self.camera_name}"
+                        )
+                        people_count = None
 
             except Exception as det_err:
                 logger.error(

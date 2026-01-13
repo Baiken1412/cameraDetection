@@ -86,5 +86,11 @@
     "iou_threshold": 0.4,
     "force_engine": null,
     "num_threads": null
+  },
+  "YOLO_POOL_CONFIG": {
+    "enabled": true,
+    "pool_size": 2,
+    "detector_type": "adaptive",
+    "timeout": 30
   }
 }

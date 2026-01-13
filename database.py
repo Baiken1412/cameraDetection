@@ -142,7 +142,7 @@ class Database:
             if conn:
                 try:
                     with conn.cursor() as cursor:
-                        sql = "SELECT id, fjmc, gnslx, ip, dk, tdh, xh, zh, mm, rtspssl FROM app_roomip WHERE rtspssl LIKE 'usb:%' LIMIT 1"
+                        sql = "SELECT id, fjmc, gnslx, ip, dk, tdh, xh, zh, mm, rtspssl, yolo_pool_id FROM app_roomip WHERE rtspssl LIKE 'usb:%' LIMIT 1"
                         cursor.execute(sql)
                         usb_camera_db = cursor.fetchone()
                         
@@ -163,6 +163,7 @@ class Database:
                                 'zh': usb_camera_db['zh'] or '',
                                 'mm': usb_camera_db['mm'] or '',
                                 'sblx': 'USB',
+                                'yolo_pool_id': usb_camera_db.get('yolo_pool_id'),  # YOLO池ID
                             }
                             cameras.append(usb_camera)
                             logger.info(f"已从数据库加载USB摄像头: {usb_camera['fjmc']} (ID: {usb_camera['id']})")

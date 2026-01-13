@@ -90,6 +90,7 @@ REID_CONFIG = _config.get('REID_CONFIG', {})
 REID_DATABASE_CONFIG = _config.get('REID_DATABASE_CONFIG', {})
 LOG_CONFIG = _config.get('LOG_CONFIG', {})
 ADAPTIVE_DETECTION_CONFIG = _config.get('ADAPTIVE_DETECTION_CONFIG', {})
+YOLO_POOL_CONFIG = _config.get('YOLO_POOL_CONFIG', {})
 
 def ensure_directories():
     """确保必要的目录存在"""

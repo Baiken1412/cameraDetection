@@ -3,24 +3,40 @@
 RTSP视频流监测系统 - PyInstaller配置文件
 """
 
+from PyInstaller.utils.hooks import collect_all
+import os
+import onnxruntime  # <---【关键修改1】导入库以获取真实路径
+
 block_cipher = None
 
-# 需要包含的数据文件
+# 1. 使用 collect_all 自动收集 onnxruntime 的基础依赖
+ort_datas, ort_binaries, ort_hiddenimports = collect_all('onnxruntime')
+
+# 2. 【关键修改2】强制添加 onnxruntime 完整包路径
+# 这可以解决部分 DLL 加载路径不匹配或文件遗漏的问题
+ort_path = os.path.dirname(onnxruntime.__file__)
+# 格式: (源路径, 目标路径) -> 将整个文件夹拷贝到顶层 onnxruntime 目录
+force_ort_datas = [(ort_path, 'onnxruntime')]
+
+# 3. 定义原本需要的资源文件
 added_files = [
     ('models', 'models'),
     ('static', 'static'),
     ('templates', 'templates'),
     ('data', 'data'),
     ('*.sql', '.'),
-    ('config.json', '.'),  # 配置文件模板，首次运行自动复制到exe同级
+    ('config.json', '.'),  # 配置文件模板
     ('使用说明.txt', '.'),  # 使用说明文档
 ]
+
+# 4. 合并所有数据文件：原有文件 + 自动收集的ORT数据 + 强制拷贝的ORT数据
+all_datas = added_files + ort_datas + force_ort_datas
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=added_files,
+    binaries=ort_binaries,
+    datas=all_datas,  # <--- 使用合并后的 datas
     hiddenimports=[
         'av',
         'cv2',
@@ -32,6 +48,8 @@ a = Analysis(
         'flask',
         'docx',
         'markdown',
+        'onnxruntime',
+        'openvino',
         # 核心模块
         'config_loader',
         'database',
@@ -68,7 +86,7 @@ a = Analysis(
         'reid_web_app',
         'person_management_api',
         'person_manager',
-    ],
+    ] + ort_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -91,13 +109,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # 显示控制台窗口以查看日志
+    console=True,  # 保持开启以查看报错信息
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # 如果有 icon 文件，可以在这里指定
 )
 
 coll = COLLECT(
@@ -105,8 +122,9 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    [('config.json', 'config.json', 'DATA')],  # 配置文件放到exe同级
-    [('使用说明.txt', '使用说明.txt', 'DATA')],  # 使用说明放到exe同级
+    # 下面这两行再次添加是为了确保它们暴露在根目录，方便用户修改
+    [('config.json', 'config.json', 'DATA')],
+    [('使用说明.txt', '使用说明.txt', 'DATA')],
     strip=False,
     upx=True,
     upx_exclude=[],

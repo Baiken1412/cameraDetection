@@ -36,8 +36,12 @@ class PersonDetectorONNX:
         """
         try:
             import onnxruntime as ort
-        except ImportError:
-            raise ImportError("请安装 onnxruntime: pip install onnxruntime")
+        except ImportError as e:
+            # 打印详细的错误堆栈，这对找出缺哪个DLL至关重要
+            import traceback
+            traceback.print_exc()
+            # 将真实错误抛出
+            raise ImportError(f"ONNX导入失败，真实原因: {e}")
 
         self.model_path = model_path
         self.conf_threshold = conf_threshold

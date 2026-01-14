@@ -13,7 +13,9 @@
       "Bash(tasklist:*)",
       "Bash(findstr:*)",
       "Bash(find:*)",
-      "Bash(mysql:*)"
+      "Bash(mysql:*)",
+      "Bash(ls:*)",
+      "Bash(pip uninstall:*)"
     ]
   }
 }

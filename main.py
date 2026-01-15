@@ -2,6 +2,8 @@
 RTSP视频流监测系统 - 主程序
 使用背景建模法进行检测
 """
+import os
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;0"
 import multiprocessing
 import signal
 import sys

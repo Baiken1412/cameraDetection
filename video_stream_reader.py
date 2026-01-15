@@ -156,7 +156,7 @@ class VideoStreamReader:
                             self.total_read_count = 0
                             self.total_drop_count = 0
                             self.last_stats_log_time = current_time
-                    time.sleep(0.015)
+                            pass
                 else:
                     # 读取失败
                     consecutive_failures += 1
@@ -173,7 +173,7 @@ class VideoStreamReader:
                         break
 
                     # 失败后短暂休眠
-                    time.sleep(0.1)
+                    time.sleep(0.001)
 
                 # 极短休眠，让出CPU（避免100%占用）
                 # 但不能太长，否则会积压缓冲区

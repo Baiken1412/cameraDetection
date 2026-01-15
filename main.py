@@ -2,6 +2,7 @@
 RTSP视频流监测系统 - 主程序
 使用背景建模法进行检测
 """
+import multiprocessing
 import signal
 import sys
 import time
@@ -79,7 +80,15 @@ class RtspMonitorSystem:
 
         # 创建所需的YOLO池
         try:
-            from core.yolo_pool import YoloDetectorPool
+            # 根据配置选择多进程池或多线程池
+            use_multiprocess = config.YOLO_POOL_CONFIG.get('use_multiprocess', False)
+
+            if use_multiprocess:
+                from core.yolo_process_pool import YoloProcessPool as YoloDetectorPool
+                logger.info("使用多进程 YOLO 池（解决 GIL 阻塞问题）")
+            else:
+                from core.yolo_pool import YoloDetectorPool
+                logger.info("使用多线程 YOLO 池")
 
             # 准备检测器配置
             if config.YOLO_POOL_CONFIG.get('detector_type', 'adaptive') == 'adaptive':
@@ -277,5 +286,7 @@ def main():
 
 
 if __name__ == '__main__':
+    # Windows 多进程支持（打包成 exe 后必需）
+    multiprocessing.freeze_support()
     main()
 

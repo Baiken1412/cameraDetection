@@ -92,6 +92,7 @@
     "enabled": true,
     "pool_size": 2,
     "detector_type": "adaptive",
-    "timeout": 30
+    "timeout": 30,
+    "use_multiprocess": true
   }
 }

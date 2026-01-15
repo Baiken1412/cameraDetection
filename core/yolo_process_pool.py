@@ -61,7 +61,8 @@ def _worker_process(
                 conf_threshold=detector_config.get('conf_threshold', 0.5),
                 iou_threshold=detector_config.get('iou_threshold', 0.4),
                 force_engine=detector_config.get('force_engine'),
-                num_threads=detector_config.get('num_threads')
+                num_threads=detector_config.get('num_threads'),
+                imgsz=detector_config.get('imgsz', 320)  # 默认320加速推理
             )
         else:
             from core.detector import PersonDetector

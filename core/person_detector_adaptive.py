@@ -30,7 +30,8 @@ class AdaptivePersonDetector:
         conf_threshold: float = 0.5,
         iou_threshold: float = 0.4,
         force_engine: str = None,  # 强制使用指定引擎: 'openvino' 或 'onnx'
-        num_threads: int = None
+        num_threads: int = None,
+        imgsz: int = None  # 输入图像尺寸（None=使用模型默认值）
     ):
         """
         初始化自适应检测器
@@ -41,7 +42,9 @@ class AdaptivePersonDetector:
             iou_threshold: NMS IOU 阈值
             force_engine: 强制使用指定引擎
             num_threads: 线程数（None=自动）
+            imgsz: 输入图像尺寸（如 320, 640），None 表示使用模型默认值
         """
+        self.custom_imgsz = imgsz  # 保存自定义尺寸
         # 处理打包后的路径（PyInstaller）
         if getattr(sys, 'frozen', False):
             # 打包后的EXE环境，使用临时解压目录
@@ -81,6 +84,12 @@ class AdaptivePersonDetector:
             self._init_openvino()
         else:
             self._init_onnx()
+
+        # 如果指定了自定义尺寸，覆盖模型默认值
+        if self.custom_imgsz is not None:
+            self.input_width = self.custom_imgsz
+            self.input_height = self.custom_imgsz
+            logger.info(f"使用自定义输入尺寸: {self.custom_imgsz}x{self.custom_imgsz}")
 
         logger.info("人员检测器初始化完成")
 

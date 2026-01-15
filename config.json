@@ -86,7 +86,8 @@
     "conf_threshold": 0.5,
     "iou_threshold": 0.4,
     "force_engine": null,
-    "num_threads": null
+    "num_threads": null,
+    "imgsz": 320
   },
   "YOLO_POOL_CONFIG": {
     "enabled": true,

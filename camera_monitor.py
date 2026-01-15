@@ -1242,14 +1242,19 @@ class CameraMonitor:
             self.av_container = av.open(
             self.rtsp_url,
             options={
-                'rtsp_transport': 'tcp',
-                'max_delay': '3000000',     # [修改] 从 500000 改为 3000000 (3秒)，允许更大的网络抖动
-                'stimeout': '10000000',     # [修改] socket超时增加到 10秒
-                'buffer_size': '10240000',  # [修改] 接收缓冲区从 1MB 增加到 10MB
+                'rtsp_transport': 'tcp',      # 【必须】保持 TCP
+                'buffer_size': '20480000',    # 【强烈建议】加大到 20MB。10MB对于高码率VMS流可能不够抗突发
+                'max_delay': '5000000',       # 【建议】加大到 5秒。VMS有时候卡顿会超过3秒
+                'stimeout': '20000000',       # 【建议】加大到 20秒。防止NVR响应慢直接断开
+                
+                # === [新增关键参数] 解决 "Undefined type" 和 "too many reference frames" ===
+                'probesize': '10240000',      # 增加探测数据量，让FFmpeg看清流结构再开始解码
+                'analyzeduration': '10000000',# 增加分析时长
+                
                 'rtsp_flags': 'prefer_tcp',
             },
-            timeout=20.0  # [修改] 连接超时增加到 20秒
-            )
+            timeout=30.0  # 【建议】加大到 30秒，给VMS足够的握手时间
+        )
 
             # 获取视频流
             if len(self.av_container.streams.video) == 0:

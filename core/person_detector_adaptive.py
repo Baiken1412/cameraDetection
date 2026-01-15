@@ -145,8 +145,15 @@ class AdaptivePersonDetector:
         """初始化 ONNX Runtime 推理引擎"""
         try:
             import onnxruntime as ort
-        except ImportError:
-            raise ImportError("ONNX Runtime 未安装，请运行: pip install onnxruntime")
+            # 打印版本信息确认加载
+            logger.info(f"DEBUG: ONNX Runtime version: {ort.__version__}")
+        except ImportError as e:
+            # ！！！关键修改：打印真实错误堆栈！！！
+            import traceback
+            traceback.print_exc()
+            logger.error(f"严重错误：ONNX Runtime 导入失败。真实原因: {e}")
+            # 抛出真实错误，不要掩盖它
+            raise ImportError(f"ONNX加载失败(缺DLL或版本不兼容): {str(e)}")
 
         # 查找 ONNX 模型文件
         onnx_files = list(self.model_dir.glob("yolo11*.onnx"))

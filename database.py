@@ -306,46 +306,49 @@ class Database:
             conn.close()
     
     def trigger_event_sync(self, record_id: int) -> bool:
-        """
-        触发Java系统为指定轨迹生成复合事件
-        """
-        try:
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            from config import RTSP_MONITOR_CONFIG
-
-            # === 修改开始 ===
-            # 原代码（已失效）：
-            # base_url = RTSP_MONITOR_CONFIG['image_url_prefix'].split('/profile/')[0]
-            
-            # 新代码：尝试从 camera_api_url 获取服务器地址，或者使用默认值
-            camera_api = RTSP_MONITOR_CONFIG.get('camera_api_url', '')
-            if '://' in camera_api:
-                # 例如从 'https://localhost:8090/caseapp/track/rtspStream' 提取 'https://localhost:8090'
-                from urllib.parse import urlparse
-                parsed = urlparse(camera_api)
-                base_url = f"{parsed.scheme}://{parsed.netloc}"
-            else:
-                # 如果获取不到，就使用默认的本地地址
-                base_url = 'https://localhost:8090'
-            # === 修改结束 ===
-
-            api_url = f"{base_url}/caseapp/track/syncEventForTrack/{record_id}"
-
-            response = requests.post(api_url, timeout=5, verify=False)
-
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('code') == 0:
-                    logger.debug(f"已触发轨迹ID={record_id}的复合事件生成")
-                    return True
+            """
+            触发Java系统为指定轨迹生成复合事件
+            """
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                
+                # 【修复】删除了 'from config import RTSP_MONITOR_CONFIG'
+                # 直接使用文件头部已经导入的 config 对象 (即 config_loader)
+                
+                # === 修改开始 ===
+                # 获取配置
+                # 注意：这里改为直接从 config (config_loader) 获取
+                camera_api = config.RTSP_MONITOR_CONFIG.get('camera_api_url', '')
+                
+                if '://' in camera_api:
+                    # 例如从 'https://localhost:8090/caseapp/track/rtspStream' 提取 'https://localhost:8090'
+                    from urllib.parse import urlparse
+                    parsed = urlparse(camera_api)
+                    base_url = f"{parsed.scheme}://{parsed.netloc}"
                 else:
-                    logger.warning(f"触发复合事件生成失败 - 轨迹ID={record_id}: {result.get('msg')}")
-                    return False
-            return False
-        except Exception as e:
-            logger.warning(f"触发复合事件生成异常 - 轨迹ID={record_id}: {e}")
-            return False
+                    # 如果获取不到，就使用默认的本地地址
+                    base_url = 'https://localhost:8090'
+                # === 修改结束 ===
+
+                api_url = f"{base_url}/caseapp/track/syncEventForTrack/{record_id}"
+
+                # 发送请求
+                response = requests.post(api_url, timeout=5, verify=False)
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('code') == 0:
+                        logger.debug(f"已触发轨迹ID={record_id}的复合事件生成")
+                        return True
+                    else:
+                        logger.warning(f"触发复合事件生成失败 - 轨迹ID={record_id}: {result.get('msg')}")
+                        return False
+                return False
+            except Exception as e:
+                # 捕获所有异常，防止影响主流程
+                logger.warning(f"触发复合事件生成异常 - 轨迹ID={record_id}: {e}")
+                return False
 
     def get_last_record_time(self, qyid: int) -> Optional[datetime]:
         """查询指定摄像头最近一次记录时间"""

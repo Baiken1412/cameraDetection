@@ -1891,15 +1891,34 @@ class CameraMonitor:
     def _count_people_in_frame(self, frame) -> Optional[int]:
         """
         使用YOLO检测当前帧中的人员数量（不做保存/数据库操作）
-        
+
+        优先使用多进程 YOLO 池，避免阻塞主线程（GIL 问题）
+
         Returns:
             int: 检测到的人员数量；检测失败返回None
         """
         try:
-            # 懒加载 YOLO 检测器（与 _save_detection_result 复用同一个实例）
+            # 优先使用多进程 YOLO 池（不阻塞主线程）
+            if self.yolo_pool is not None:
+                try:
+                    detections = self.yolo_pool.detect(
+                        frame,
+                        timeout=config.YOLO_POOL_CONFIG.get('timeout', 30)
+                    )
+                    count = len(detections)
+                    logger.info(
+                        f"YOLO池合并前校验结果 - 摄像头: {self.camera_name} (ID: {self.camera_id}), 人数: {count}"
+                    )
+                    return count
+                except Exception as pool_err:
+                    logger.error(
+                        f"使用YOLO池检测失败（合并前校验）: {pool_err}"
+                    )
+                    return None
+
+            # 回退：使用本地检测器（仅当没有 yolo_pool 时）
             if self.person_detector is None:
                 try:
-                    # 优先使用自适应检测器（YOLOv11 + CPU优化）
                     if config.ADAPTIVE_DETECTION_CONFIG.get('enabled', False):
                         from core.person_detector_adaptive import AdaptivePersonDetector
                         self.person_detector = AdaptivePersonDetector(
@@ -1914,7 +1933,6 @@ class CameraMonitor:
                             f"引擎: {self.person_detector.engine.value}"
                         )
                     else:
-                        # 传统方式（兼容性）
                         from core.detector import PersonDetector
                         self.person_detector = PersonDetector()
                         logger.info(
@@ -1933,11 +1951,9 @@ class CameraMonitor:
 
             # 根据检测器类型选择推理方式
             if hasattr(self.person_detector, 'detect_image'):
-                # 自适应检测器（YOLOv11 + ONNX/OpenVINO）
                 detections = self.person_detector.detect_image(frame)
                 count = len(detections)
             else:
-                # 传统 PyTorch YOLO 检测器
                 results = self.person_detector.model.predict(
                     frame,
                     conf=self.person_detector.conf_threshold,

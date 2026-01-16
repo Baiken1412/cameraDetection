@@ -87,13 +87,13 @@
     "iou_threshold": 0.4,
     "force_engine": null,
     "num_threads": null,
-    "imgsz": 320
+    "imgsz": 640
   },
   "YOLO_POOL_CONFIG": {
     "enabled": true,
     "pool_size": 2,
     "detector_type": "adaptive",
     "timeout": 30,
-    "use_multiprocess": true
+    "use_multiprocess": false
   }
 }

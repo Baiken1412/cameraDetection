@@ -95,5 +95,12 @@
     "detector_type": "adaptive",
     "timeout": 30,
     "use_multiprocess": false
+  },
+  "INPUT_SHAPER_CONFIG": {
+    "enabled": true,
+    "target_fps": 2.0,
+    "buffer_size": 30,
+    "drop_strategy": "drop_old",
+    "empty_behavior": "skip"
   }
 }

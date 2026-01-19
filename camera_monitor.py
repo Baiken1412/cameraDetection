@@ -15,6 +15,7 @@ from database import Database
 from image_detection import ImageChangeDetection
 from image_storage import ImageStorage
 from video_stream_reader import VideoStreamReader  # 独立线程读取器
+from input_shaper import InputShaper  # 输入整形层
 import av  # PyAV for RTSP with PTS support
 
 
@@ -69,6 +70,7 @@ class CameraMonitor:
         # 视频捕获相关
         self.cap = None
         self.stream_reader = None  # 独立线程读取器
+        self.input_shaper = None   # 输入整形层
 
         # PyAV 相关
         self.av_container = None
@@ -203,10 +205,10 @@ class CameraMonitor:
                     )
                     self.detection.bg_initialized = True
                 
-                # 学习阶段
+                # 学习阶段（使用快速读取，不受节拍限制）
                 learning_end_time = time.time() + learning_time
                 while time.time() < learning_end_time and self.running:
-                    ret, frame, frame_time = self._read_frame_with_pts()
+                    ret, frame, frame_time = self._read_frame_for_learning()
                     if ret and frame is not None:
                         self.detection.bg_subtractor.apply(frame, learningRate=0.1)
                     time.sleep(0.001)
@@ -221,8 +223,8 @@ class CameraMonitor:
                 # 监测循环
                 while self.running:
                     try:
-                        # 1. 定期清理（仅非VideoStreamReader模式）
-                        if not use_stream_reader and self.stream_reader is None:
+                        # 1. 定期清理（仅非VideoStreamReader/InputShaper模式）
+                        if not use_stream_reader and self.stream_reader is None and self.input_shaper is None:
                             current_time = time.time()
                             if current_time - last_buffer_flush_time >= buffer_flush_interval:
                                 self._flush_buffer_smart(max_frames=100, reason="定期清理")
@@ -265,7 +267,7 @@ class CameraMonitor:
                             people_count = len(detections) if detections is not None else 0
 
                             # 清理缓冲区（YOLO耗时后）
-                            if not use_stream_reader and self.stream_reader is None:
+                            if not use_stream_reader and self.stream_reader is None and self.input_shaper is None:
                                 self._flush_buffer_after_yolo(max_frames=50)
 
                             # 6. 有效性判断
@@ -364,14 +366,28 @@ class CameraMonitor:
 
             if success:
                 logger.info(f"USB摄像头连接成功")
-                use_stream_reader = self.config.get('use_video_stream_reader', False)
-                if use_stream_reader:
-                    logger.info(f"启用 VideoStreamReader 独立线程")
-                    self.stream_reader = VideoStreamReader(
+                # 优先检查是否启用输入整形层
+                input_shaper_config = config.INPUT_SHAPER_CONFIG
+                if input_shaper_config.get('enabled', False):
+                    logger.info(f"启用 InputShaper 输入整形层")
+                    self.input_shaper = InputShaper(
                         self.cap,
                         camera_name=self.camera_name,
-                        use_pyav=False
+                        target_fps=input_shaper_config.get('target_fps', 2.0),
+                        buffer_size=input_shaper_config.get('buffer_size', 30),
+                        drop_strategy=input_shaper_config.get('drop_strategy', 'drop_old'),
+                        empty_behavior=input_shaper_config.get('empty_behavior', 'skip')
                     )
+                else:
+                    # 回退到原来的 VideoStreamReader
+                    use_stream_reader = self.config.get('use_video_stream_reader', False)
+                    if use_stream_reader:
+                        logger.info(f"启用 VideoStreamReader 独立线程")
+                        self.stream_reader = VideoStreamReader(
+                            self.cap,
+                            camera_name=self.camera_name,
+                            use_pyav=False
+                        )
                 return True
             else:
                 logger.error(f"USB摄像头读取测试帧失败")
@@ -420,13 +436,26 @@ class CameraMonitor:
                             return True
                     
                     self.use_pyav = False
-                    
-                    # VideoStreamReader 包装
-                    use_stream_reader = self.config.get('use_video_stream_reader', False)
-                    if use_stream_reader:
-                        self.stream_reader = VideoStreamReader(
-                            self.cap, camera_name=self.camera_name, use_pyav=False
+
+                    # 优先检查是否启用输入整形层
+                    input_shaper_config = config.INPUT_SHAPER_CONFIG
+                    if input_shaper_config.get('enabled', False):
+                        logger.info(f"启用 InputShaper 输入整形层")
+                        self.input_shaper = InputShaper(
+                            self.cap,
+                            camera_name=self.camera_name,
+                            target_fps=input_shaper_config.get('target_fps', 2.0),
+                            buffer_size=input_shaper_config.get('buffer_size', 30),
+                            drop_strategy=input_shaper_config.get('drop_strategy', 'drop_old'),
+                            empty_behavior=input_shaper_config.get('empty_behavior', 'skip')
                         )
+                    else:
+                        # 回退到原来的 VideoStreamReader
+                        use_stream_reader = self.config.get('use_video_stream_reader', False)
+                        if use_stream_reader:
+                            self.stream_reader = VideoStreamReader(
+                                self.cap, camera_name=self.camera_name, use_pyav=False
+                            )
                     return True
             
             logger.error(f"RTSP连接失败")
@@ -437,6 +466,7 @@ class CameraMonitor:
             return False
 
     def _release_capture(self):
+        if self.input_shaper: self.input_shaper.release(); self.input_shaper = None
         if self.stream_reader: self.stream_reader.release(); self.stream_reader = None
         if self.cap: self.cap.release(); self.cap = None
         self._release_pyav()
@@ -480,27 +510,37 @@ class CameraMonitor:
         pts_sec = float(pts * self.time_base)
         return self.pts_base_time + timedelta(seconds=(pts_sec - self.pts_base_offset))
 
+    def _read_frame_for_learning(self) -> Tuple[bool, Optional[any], Optional[datetime]]:
+        """用于背景学习阶段的快速帧读取（不受节拍限制）"""
+        if self.input_shaper:
+            return self.input_shaper.read_nowait()
+        return self._read_frame_with_pts()
+
     def _read_frame_with_pts(self) -> Tuple[bool, Optional[any], Optional[datetime]]:
+        # 优先使用输入整形层
+        if self.input_shaper:
+            return self.input_shaper.read()
+
         if self.use_pyav and self.av_decoder:
             try:
                 for frame in self.av_decoder:
                     img = frame.to_ndarray(format='bgr24')
                     return True, img, self._pts_to_datetime(frame.pts)
-            except: 
+            except:
                 self.use_pyav = False # 降级
                 return False, None, None
-        
+
         if self.stream_reader:
             return self.stream_reader.read()
-            
+
         if self.cap:
             ret, frame = self.cap.read()
             return ret, frame, datetime.now()
-            
+
         return False, None, None
 
     def _flush_buffer_smart(self, max_frames=100, reason=""):
-        if self.use_pyav or self.stream_reader: return 0
+        if self.use_pyav or self.stream_reader or self.input_shaper: return 0
         count = 0
         if self.cap:
             for _ in range(max_frames):

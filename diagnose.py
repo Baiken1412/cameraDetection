@@ -246,13 +246,6 @@ def check_network(hosts=None):
             print(f"  {host}: 错误 - {e}")
 
 
-def calculate_sharpness(frame):
-    """计算图像清晰度（Laplacian方差法）"""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-    return float(laplacian.var())
-
-
 def check_video_source(url_or_id, name="Camera"):
     """检查单个视频源"""
     import numpy as np
@@ -313,11 +306,10 @@ def check_video_source(url_or_id, name="Camera"):
             diagnosis["issues"].append(f"分辨率较低: {name} = {width}x{height}")
             diagnosis["recommendations"].append(f"考虑提高 {name} 的分辨率设置")
 
-        # 测试读取帧（测30帧，检测稳定性和清晰度）
+        # 测试读取帧（测30帧，检测稳定性）
         frame_times = []
         frames_read = 0
         frames_failed = 0
-        sharpness_values = []
 
         for i in range(30):
             start = time.time()
@@ -328,24 +320,18 @@ def check_video_source(url_or_id, name="Camera"):
                 frames_read += 1
                 frame_times.append(elapsed)
 
-                # 检查帧质量（前5帧）
-                if i < 5:
+                # 检查帧质量（第一帧）
+                if i == 0:
                     # 亮度检测
                     frame_mean = float(np.mean(frame))
                     frame_std = float(np.std(frame))
+                    result["frame_mean"] = frame_mean
+                    result["frame_std"] = frame_std
 
-                    if i == 0:
-                        result["frame_mean"] = frame_mean
-                        result["frame_std"] = frame_std
-
-                        if frame_mean < 10:
-                            diagnosis["issues"].append(f"画面过暗: {name} (亮度={frame_mean:.1f})")
-                        elif frame_mean > 245:
-                            diagnosis["issues"].append(f"画面过亮: {name} (亮度={frame_mean:.1f})")
-
-                    # 清晰度检测
-                    sharpness = calculate_sharpness(frame)
-                    sharpness_values.append(sharpness)
+                    if frame_mean < 10:
+                        diagnosis["issues"].append(f"画面过暗: {name} (亮度={frame_mean:.1f})")
+                    elif frame_mean > 245:
+                        diagnosis["issues"].append(f"画面过亮: {name} (亮度={frame_mean:.1f})")
             else:
                 frames_failed += 1
 
@@ -369,19 +355,6 @@ def check_video_source(url_or_id, name="Camera"):
             if result['frame_loss_rate'] > 10:
                 diagnosis["issues"].append(f"丢帧率过高: {name} = {result['frame_loss_rate']:.1f}%")
                 diagnosis["recommendations"].append(f"检查 {name} 的网络稳定性，考虑使用TCP传输")
-
-            # 清晰度分析
-            if sharpness_values:
-                avg_sharpness = sum(sharpness_values) / len(sharpness_values)
-                result["sharpness"] = round(avg_sharpness, 1)
-                print(f"    清晰度: {avg_sharpness:.1f} (Laplacian方差)")
-
-                # 清晰度阈值：< 100 通常表示模糊
-                if avg_sharpness < 100:
-                    diagnosis["issues"].append(f"画面模糊: {name} (清晰度={avg_sharpness:.1f})")
-                    diagnosis["recommendations"].append(f"检查 {name} 的对焦、镜头清洁度或网络传输质量")
-                elif avg_sharpness < 300:
-                    print(f"    提示: 清晰度一般，可能存在轻微模糊")
         else:
             result["status"] = "failed"
             result["error"] = "无法读取帧"
@@ -567,78 +540,6 @@ def check_log_errors():
         print(f"  读取日志失败: {e}")
 
 
-def check_image_quality():
-    """检查保存的图片质量"""
-    print("\n" + "=" * 60)
-    print("6. 图片质量检查")
-    print("=" * 60)
-
-    try:
-        config_path = Path(__file__).parent / "config.json"
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-
-        image_path = config.get("RTSP_MONITOR_CONFIG", {}).get("image_save_path", "")
-        if not image_path:
-            print("  未配置图片保存路径")
-            return
-
-        image_dir = Path(image_path)
-        if not image_dir.exists():
-            print(f"  图片目录不存在: {image_path}")
-            return
-
-        # 查找最近的图片
-        images = list(image_dir.rglob("*.jpg")) + list(image_dir.rglob("*.png"))
-        if not images:
-            print("  没有找到保存的图片")
-            return
-
-        # 检查最近10张图片
-        recent_images = sorted(images, key=lambda p: p.stat().st_mtime, reverse=True)[:10]
-
-        print(f"  检查最近 {len(recent_images)} 张图片:")
-        low_sharpness_count = 0
-        low_resolution_count = 0
-
-        for img_path in recent_images:
-            img = cv2.imread(str(img_path))
-            if img is not None:
-                h, w = img.shape[:2]
-                size_kb = img_path.stat().st_size / 1024
-
-                # 计算清晰度
-                sharpness = calculate_sharpness(img)
-
-                # 判断质量
-                quality_notes = []
-                if w < 640 or h < 480:
-                    quality_notes.append("分辨率低")
-                    low_resolution_count += 1
-                if size_kb < 20:
-                    quality_notes.append("文件过小")
-                if sharpness < 100:
-                    quality_notes.append("模糊")
-                    low_sharpness_count += 1
-                elif sharpness < 300:
-                    quality_notes.append("清晰度一般")
-
-                quality_str = f" [{', '.join(quality_notes)}]" if quality_notes else ""
-                print(f"    {img_path.name}: {w}x{h}, {size_kb:.1f}KB, 清晰度={sharpness:.0f}{quality_str}")
-
-        # 汇总问题
-        if low_resolution_count > 0:
-            diagnosis["issues"].append(f"保存图片分辨率较低: {low_resolution_count}/{len(recent_images)} 张")
-            diagnosis["recommendations"].append("检查摄像头分辨率设置或RTSP流配置")
-
-        if low_sharpness_count > len(recent_images) * 0.3:  # 超过30%的图片模糊
-            diagnosis["issues"].append(f"保存图片模糊比例过高: {low_sharpness_count}/{len(recent_images)} 张")
-            diagnosis["recommendations"].append("可能原因: 1)摄像头对焦问题 2)网络传输丢包 3)运动模糊 4)镜头脏污")
-
-    except Exception as e:
-        print(f"  检查图片失败: {e}")
-
-
 def print_summary(output_dir=None):
     """打印诊断总结"""
     print("\n" + "=" * 60)
@@ -715,7 +616,6 @@ def main():
         check_video_sources_from_db()
 
     check_log_errors()
-    check_image_quality()
     print_summary()
 
 
@@ -753,7 +653,6 @@ def run_diagnosis(output_dir=None, quick=False):
         check_video_sources_from_db()
 
     check_log_errors()
-    check_image_quality()
 
     report_path = print_summary(output_dir)
     logger.info(f"诊断完成，报告已保存: {report_path}")

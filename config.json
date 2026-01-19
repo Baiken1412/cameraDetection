@@ -102,5 +102,10 @@
     "buffer_size": 30,
     "drop_strategy": "drop_old",
     "empty_behavior": "skip"
+  },
+  "DIAGNOSE_CONFIG": {
+    "enabled": false,
+    "interval_minutes": 30,
+    "output_dir": "diagnosis_reports"
   }
 }

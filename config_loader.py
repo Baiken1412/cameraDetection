@@ -92,6 +92,7 @@ LOG_CONFIG = _config.get('LOG_CONFIG', {})
 ADAPTIVE_DETECTION_CONFIG = _config.get('ADAPTIVE_DETECTION_CONFIG', {})
 YOLO_POOL_CONFIG = _config.get('YOLO_POOL_CONFIG', {})
 INPUT_SHAPER_CONFIG = _config.get('INPUT_SHAPER_CONFIG', {})
+DIAGNOSE_CONFIG = _config.get('DIAGNOSE_CONFIG', {})
 
 def ensure_directories():
     """确保必要的目录存在"""

@@ -306,22 +306,28 @@ def check_video_source(url_or_id, name="Camera"):
             diagnosis["issues"].append(f"分辨率较低: {name} = {width}x{height}")
             diagnosis["recommendations"].append(f"考虑提高 {name} 的分辨率设置")
 
-        # 测试读取帧（测30帧，检测稳定性）
-        frame_times = []
+        # 测试读取帧（测5秒，检测实际帧率和稳定性）
+        test_duration = 5.0  # 测试时长（秒）
         frames_read = 0
         frames_failed = 0
+        first_frame_checked = False
+        nominal_fps = fps if fps > 0 else 25  # 标称帧率，用于防止读缓冲区过快
 
-        for i in range(30):
-            start = time.time()
+        start_time = time.time()
+        while True:
+            now = time.time()
+            elapsed = now - start_time
+            if elapsed >= test_duration:
+                break
+
             ret, frame = cap.read()
-            elapsed = time.time() - start
 
             if ret and frame is not None:
                 frames_read += 1
-                frame_times.append(elapsed)
 
                 # 检查帧质量（第一帧）
-                if i == 0:
+                if not first_frame_checked:
+                    first_frame_checked = True
                     # 亮度检测
                     frame_mean = float(np.mean(frame))
                     frame_std = float(np.std(frame))
@@ -332,24 +338,30 @@ def check_video_source(url_or_id, name="Camera"):
                         diagnosis["issues"].append(f"画面过暗: {name} (亮度={frame_mean:.1f})")
                     elif frame_mean > 245:
                         diagnosis["issues"].append(f"画面过亮: {name} (亮度={frame_mean:.1f})")
+
+                # 防止读缓冲区过快：如果读取速度超过标称帧率的1.5倍，适当让出CPU
+                if elapsed > 0 and frames_read / elapsed > nominal_fps * 1.5:
+                    time.sleep(0.01)
             else:
                 frames_failed += 1
 
+        elapsed_time = time.time() - start_time
+
         # 统计结果
         if frames_read > 0:
-            avg_frame_time = sum(frame_times) / len(frame_times)
-            result["avg_frame_time_ms"] = round(avg_frame_time * 1000, 1)
-            result["actual_fps"] = round(1.0 / avg_frame_time, 1) if avg_frame_time > 0 else 0
+            actual_fps = frames_read / elapsed_time
+            result["actual_fps"] = round(actual_fps, 1)
             result["frames_read"] = frames_read
             result["frames_failed"] = frames_failed
-            result["frame_loss_rate"] = round(frames_failed / 30 * 100, 1)
+            result["test_duration_sec"] = round(elapsed_time, 1)
+            result["frame_loss_rate"] = round(frames_failed / (frames_read + frames_failed) * 100, 1) if (frames_read + frames_failed) > 0 else 0
             result["status"] = "ok"
 
-            print(f"    实际帧率: {result['actual_fps']:.1f} fps (读取耗时 {avg_frame_time*1000:.1f}ms/帧)")
-            print(f"    丢帧率: {result['frame_loss_rate']:.1f}% ({frames_failed}/30)")
+            print(f"    实际帧率: {actual_fps:.1f} fps ({frames_read}帧/{elapsed_time:.1f}秒)")
+            print(f"    丢帧: {frames_failed} 次")
 
-            if result['actual_fps'] < 5:
-                diagnosis["issues"].append(f"实际帧率过低: {name} = {result['actual_fps']:.1f}fps")
+            if actual_fps < 5:
+                diagnosis["issues"].append(f"实际帧率过低: {name} = {actual_fps:.1f}fps")
                 diagnosis["recommendations"].append(f"检查 {name} 的网络带宽或摄像头性能")
 
             if result['frame_loss_rate'] > 10:

@@ -105,8 +105,8 @@ class AdaptivePersonDetector:
 
         # 查找 OpenVINO 模型文件
         # OpenVINO IR 格式: .xml + .bin
-        # 支持两种路径：直接在 models/ 或在 models/*_openvino_model/ 子目录中
-        xml_files = list(self.model_dir.glob("yolo11*.xml"))
+        # 支持 YOLOv8 和 YOLOv11，以及 openvino_model 子目录
+        xml_files = list(self.model_dir.glob("yolo11*.xml")) + list(self.model_dir.glob("yolov8*.xml"))
         if not xml_files:
             # 尝试在 openvino_model 子目录中查找
             xml_files = list(self.model_dir.glob("*_openvino_model/*.xml"))
@@ -164,8 +164,8 @@ class AdaptivePersonDetector:
             # 抛出真实错误，不要掩盖它
             raise ImportError(f"ONNX加载失败(缺DLL或版本不兼容): {str(e)}")
 
-        # 查找 ONNX 模型文件
-        onnx_files = list(self.model_dir.glob("yolo11*.onnx"))
+        # 查找 ONNX 模型文件（支持 YOLOv8 和 YOLOv11）
+        onnx_files = list(self.model_dir.glob("yolo11*.onnx")) + list(self.model_dir.glob("yolov8*.onnx"))
 
         if not onnx_files:
             raise FileNotFoundError(

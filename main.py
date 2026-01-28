@@ -23,6 +23,7 @@ class RtspMonitorSystem:
         self.monitors = {}  # 存储每个摄像头的监测对象
         self.yolo_pools = {}  # YOLO实例池字典: {pool_id: YoloDetectorPool}
         self.default_yolo_pool = None  # 默认全局YOLO池（用于yolo_pool_id=NULL的摄像头）
+        self.diagnose_scheduler = None  # 诊断调度器
         self.running = False
 
         # 自动重启机制
@@ -171,7 +172,46 @@ class RtspMonitorSystem:
 
         logger.info("========== RTSP监测服务启动完成 ==========")
         self.running = True
-    
+
+        # 启动诊断调度器（如果启用）
+        self._start_diagnose_scheduler()
+
+    def _start_diagnose_scheduler(self):
+        """启动诊断调度器"""
+        diagnose_config = config.DIAGNOSE_CONFIG if hasattr(config, 'DIAGNOSE_CONFIG') else {}
+
+        if not diagnose_config.get('enabled', False):
+            logger.info("诊断调度器未启用")
+            return
+
+        try:
+            from diagnose import DiagnoseScheduler
+            from pathlib import Path
+
+            interval = diagnose_config.get('interval_minutes', 30)
+            output_dir = diagnose_config.get('output_dir', 'diagnosis_reports')
+
+            # 转为绝对路径
+            if not Path(output_dir).is_absolute():
+                output_dir = Path(__file__).parent / output_dir
+
+            self.diagnose_scheduler = DiagnoseScheduler(
+                interval_minutes=interval,
+                output_dir=str(output_dir)
+            )
+            self.diagnose_scheduler.start()
+            logger.info(f"诊断调度器已启动，间隔: {interval} 分钟，输出目录: {output_dir}")
+
+        except Exception as e:
+            logger.error(f"启动诊断调度器失败: {e}")
+
+    def _stop_diagnose_scheduler(self):
+        """停止诊断调度器"""
+        if self.diagnose_scheduler:
+            self.diagnose_scheduler.stop()
+            self.diagnose_scheduler = None
+            logger.info("诊断调度器已停止")
+
     def stop_all_monitors(self):
         """停止所有监测"""
         logger.info("========== 停止所有RTSP监测服务 ==========")
@@ -271,6 +311,10 @@ class RtspMonitorSystem:
     def shutdown(self):
         """关闭系统"""
         logger.info("正在关闭系统...")
+
+        # 停止诊断调度器
+        self._stop_diagnose_scheduler()
+
         self.stop_all_monitors()
 
         # 关闭所有YOLO实例池

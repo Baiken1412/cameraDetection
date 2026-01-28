@@ -96,7 +96,7 @@
     "pool_size": 2,
     "detector_type": "adaptive",
     "timeout": 30,
-    "use_multiprocess": false
+    "use_multiprocess": true
   },
   "INPUT_SHAPER_CONFIG": {
     "enabled": true,
@@ -104,5 +104,10 @@
     "buffer_size": 30,
     "drop_strategy": "drop_old",
     "empty_behavior": "skip"
+  },
+  "DIAGNOSE_CONFIG": {
+    "enabled": true,
+    "interval_minutes": 30,
+    "output_dir": "diagnosis_reports"
   }
 }

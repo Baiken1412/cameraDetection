@@ -41,6 +41,72 @@ def get_caseapp_db():
     return caseapp_db
 
 
+@app.route('/api/cameras', methods=['GET'])
+def api_get_cameras():
+    """
+    获取摄像头列表
+    符合 specs/Web界面与API.md 需求 1
+    """
+    try:
+        db = get_caseapp_db()
+        cameras = db.get_all_cameras()
+        return jsonify({
+            'success': True,
+            'cameras': cameras,
+            'total': len(cameras)
+        })
+    except Exception as e:
+        logger.error(f"获取摄像头列表失败: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/statistics', methods=['GET'])
+def api_get_statistics():
+    """
+    获取统计数据
+    符合 specs/Web界面与API.md 需求 1
+    """
+    try:
+        db = get_caseapp_db()
+        cameras = db.get_all_cameras()
+        records = db.get_all_records(limit=10000)
+
+        # 计算统计数据
+        total_cameras = len(cameras)
+        total_records = len(records)
+
+        # 今日记录数
+        from datetime import datetime, date
+        today = date.today()
+        today_records = sum(1 for r in records
+                          if r.get('jcsj') and
+                          (isinstance(r['jcsj'], datetime) and r['jcsj'].date() == today))
+
+        # 已识别/未识别人员数
+        identified_count = sum(1 for r in records if r.get('ryxm'))
+        unidentified_count = total_records - identified_count
+
+        return jsonify({
+            'success': True,
+            'statistics': {
+                'total_cameras': total_cameras,
+                'total_records': total_records,
+                'today_records': today_records,
+                'identified_count': identified_count,
+                'unidentified_count': unidentified_count
+            }
+        })
+    except Exception as e:
+        logger.error(f"获取统计数据失败: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
 @app.route('/api/person/emp_list', methods=['GET'])
 def api_get_emp_list():
     """

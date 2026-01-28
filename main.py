@@ -30,6 +30,7 @@ class RtspMonitorSystem:
         self.restart_times = {}   # {camera_id: 上次重启时间}
         self.max_restarts = 10    # 最大重启次数
         self.restart_interval = 60  # 重启间隔（秒）
+        self.stable_reset_time = 3600  # 稳定运行多久后重置计数（秒），默认1小时
     
     def initialize(self):
         """初始化系统"""
@@ -362,6 +363,20 @@ def main():
                 for camera_id, monitor in list(monitor_system.monitors.items()):
                     if not monitor.is_running():
                         monitor_system.restart_monitor(camera_id)
+                    else:
+                        # 摄像头正常运行，检查是否需要重置重启计数
+                        if camera_id in monitor_system.restart_times:
+                            last_restart = monitor_system.restart_times[camera_id]
+                            if time.time() - last_restart >= monitor_system.stable_reset_time:
+                                # 稳定运行超过阈值，重置计数
+                                old_count = monitor_system.restart_counts.get(camera_id, 0)
+                                if old_count > 0:
+                                    monitor_system.restart_counts[camera_id] = 0
+                                    del monitor_system.restart_times[camera_id]
+                                    logger.info(
+                                        f"摄像头 {camera_id} ({monitor.camera_name}) "
+                                        f"稳定运行超过1小时，重启计数已重置 ({old_count} → 0)"
+                                    )
         
     except KeyboardInterrupt:
         logger.info("用户中断，正在关闭系统...")

@@ -129,8 +129,23 @@ class CameraMonitor:
     def stop(self):
         """停止监测"""
         self.running = False
+
+        # 等待监测线程退出
         if self.monitor_thread:
             self.monitor_thread.join(timeout=5)
+
+        # 等待工作线程处理完队列中剩余的任务
+        if self.worker_thread and self.worker_thread.is_alive():
+            # 等待队列清空（最多3秒）
+            try:
+                self.task_queue.join()
+            except:
+                pass
+            # 等待工作线程退出
+            self.worker_thread.join(timeout=3)
+            if self.worker_thread.is_alive():
+                logger.warning(f"工作线程未能在超时内退出 - {self.camera_name}")
+
         self._release_capture()
         logger.info(f"停止监测摄像头: {self.camera_name} (ID: {self.camera_id})")
 
@@ -161,6 +176,28 @@ class CameraMonitor:
 
             except Exception as e:
                 logger.error(f"后台工作线程异常 - 摄像头: {self.camera_name}: {e}", exc_info=True)
+
+        # 退出前处理队列中剩余的任务（避免截图丢失）
+        remaining = 0
+        while not self.task_queue.empty():
+            try:
+                task_data = self.task_queue.get_nowait()
+                if len(task_data) == 3:
+                    frame, capture_time, detections = task_data
+                else:
+                    frame, capture_time = task_data
+                    detections = None
+                self._save_detection_result(frame, capture_time, detections=detections)
+                self.task_queue.task_done()
+                remaining += 1
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error(f"处理剩余任务异常: {e}")
+                break
+
+        if remaining > 0:
+            logger.info(f"工作线程退出前处理了 {remaining} 个剩余任务 - {self.camera_name}")
 
         logger.info(f"后台工作线程已停止 - 摄像头: {self.camera_name}")
 
@@ -654,9 +691,10 @@ class CameraMonitor:
             if hasattr(self.person_detector, 'detect_image'):
                 return self.person_detector.detect_image(frame)
             
-            # 兼容旧predict
+            # 兼容旧predict（使用配置中的置信度阈值）
+            conf = config.ADAPTIVE_DETECTION_CONFIG.get('conf_threshold', 0.5)
             results = self.person_detector.model.predict(
-                frame, conf=0.45, classes=[0], verbose=False
+                frame, conf=conf, classes=[0], verbose=False
             )
             return [{} for _ in results[0].boxes] if results else []
 

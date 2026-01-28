@@ -2,6 +2,7 @@
 图像变化检测模块
 使用背景建模法（Background Subtraction）检测画面变化
 """
+import random
 import cv2
 import numpy as np
 from loguru import logger
@@ -139,7 +140,6 @@ class ImageChangeDetection:
                 fg_mask = self.bg_subtractor.apply(current_frame, learningRate=base_learning_rate)
             
             # 调试输出：定期输出前景掩码统计信息（处理前）
-            import random
             fg_pixels_before = np.count_nonzero(fg_mask)
             total_pixels = fg_mask.size
             fg_ratio_before = fg_pixels_before / total_pixels if total_pixels > 0 else 0
@@ -207,7 +207,6 @@ class ImageChangeDetection:
                     total_filtered += area
             
             # 调试输出：如果过滤掉了大量区域，输出警告
-            import random
             if total_filtered > 0 and random.random() < 0.1:
                 filtered_ratio = total_filtered / thresh.size if thresh.size > 0 else 0
                 if filtered_ratio > 0.01:  # 如果过滤掉了超过1%的区域

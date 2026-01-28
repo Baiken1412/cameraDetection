@@ -227,7 +227,7 @@ class CameraMonitor:
                         if not use_stream_reader and self.stream_reader is None and self.input_shaper is None:
                             current_time = time.time()
                             if current_time - last_buffer_flush_time >= buffer_flush_interval:
-                                self._flush_buffer_smart(max_frames=100, reason="定期清理")
+                                self._flush_buffer_smart(max_frames=self.config.get('buffer_flush_max_frames', 150), reason="定期清理")
                                 last_buffer_flush_time = current_time
 
                         # 2. 读取最新帧
@@ -268,7 +268,7 @@ class CameraMonitor:
 
                             # 清理缓冲区（YOLO耗时后）
                             if not use_stream_reader and self.stream_reader is None and self.input_shaper is None:
-                                self._flush_buffer_after_yolo(max_frames=50)
+                                self._flush_buffer_after_yolo(max_frames=self.config.get('buffer_flush_after_yolo_frames', 100))
 
                             # 6. 有效性判断
                             if detections is None or people_count <= 0:

@@ -20,6 +20,7 @@ class ImageStorage:
         self.save_to_file = self.config['save_image_to_file']
         image_save_path = self.config['image_save_path']
         self.image_url_prefix = self.config.get('image_url_prefix', '')
+        self.jpeg_quality = self.config.get('jpeg_quality', 95)
         
         # 转换为绝对路径，确保路径正确
         if not os.path.isabs(image_save_path):
@@ -139,7 +140,7 @@ class ImageStorage:
             
             # 方法1: 尝试使用工具函数保存（支持中文路径）
             try:
-                cv2_success = cv2_save_image(frame, file_path, quality=85)
+                cv2_success = cv2_save_image(frame, file_path, quality=self.jpeg_quality)
 
                 # 立即验证文件是否真的存在
                 if cv2_success and file_path.exists():
@@ -193,7 +194,7 @@ class ImageStorage:
                         pil_image = Image.fromarray(frame_array)
                     
                     # 保存
-                    pil_image.save(str(file_path), 'JPEG', quality=85, optimize=True)
+                    pil_image.save(str(file_path), 'JPEG', quality=self.jpeg_quality, optimize=True)
                     
                     # 验证PIL保存是否成功
                     if file_path.exists() and file_path.stat().st_size > 0:
@@ -263,7 +264,7 @@ class ImageStorage:
         """
         try:
             # 编码为JPEG
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
             success, buffer = cv2.imencode('.jpg', frame, encode_param)
             
             if not success:

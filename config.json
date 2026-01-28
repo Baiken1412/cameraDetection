@@ -23,6 +23,7 @@
     "image_save_path": "D:/appdata/uploadPath/caseapp",
     "image_url_prefix": "",
     "save_image_to_file": true,
+    "jpeg_quality": 95,
     "min_record_interval": 10,
     "detection_wait_after_save": 120,
     "record_merge_interval": 0,

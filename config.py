@@ -86,7 +86,10 @@ RTSP_MONITOR_CONFIG = {
 
     # 是否保存图片到文件系统（True:保存文件，False:Base64存数据库）
     'save_image_to_file': True,
-    
+
+    # JPEG 保存质量（1-100，默认95）
+    'jpeg_quality': 95,
+
     # 最小记录间隔（秒），保存完当前图片后，等待此时间后再保存下一张
     'min_record_interval': 10,  # 改为10秒，支持更频繁的记录合并
 

@@ -416,7 +416,7 @@ class CameraMonitor:
             # 设置缓冲区
             try:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3) # 尽可能小
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.config.get('rtsp_timeout', 30) * 1000)
             except: pass
 
             time.sleep(1.0)
@@ -485,7 +485,7 @@ class CameraMonitor:
             self.av_container = av.open(
                 self.rtsp_url,
                 options={'rtsp_transport': 'tcp', 'buffer_size': '20480000'}, # 大缓冲抗抖动
-                timeout=20.0
+                timeout=self.config.get('rtsp_timeout', 30)
             )
             if len(self.av_container.streams.video) == 0: return False
             self.av_stream = self.av_container.streams.video[0]

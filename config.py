@@ -90,6 +90,9 @@ RTSP_MONITOR_CONFIG = {
     # JPEG 保存质量（1-100，默认95）
     'jpeg_quality': 95,
 
+    # 图片最大宽度（像素），超过此宽度的图片将等比缩放
+    'max_image_width': 1920,
+
     # 最小记录间隔（秒），保存完当前图片后，等待此时间后再保存下一张
     'min_record_interval': 10,  # 改为10秒，支持更频繁的记录合并
 

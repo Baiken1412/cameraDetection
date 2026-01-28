@@ -24,6 +24,7 @@
     "image_url_prefix": "",
     "save_image_to_file": true,
     "jpeg_quality": 95,
+    "max_image_width": 1920,
     "min_record_interval": 10,
     "detection_wait_after_save": 120,
     "record_merge_interval": 0,

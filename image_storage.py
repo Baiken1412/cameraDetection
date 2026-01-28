@@ -21,6 +21,7 @@ class ImageStorage:
         image_save_path = self.config['image_save_path']
         self.image_url_prefix = self.config.get('image_url_prefix', '')
         self.jpeg_quality = self.config.get('jpeg_quality', 95)
+        self.max_image_width = self.config.get('max_image_width', 1920)
         
         # 转换为绝对路径，确保路径正确
         if not os.path.isabs(image_save_path):
@@ -119,6 +120,9 @@ class ImageStorage:
             if np.any(np.isnan(frame)) or np.any(np.isinf(frame)):
                 logger.error("帧包含NaN或Inf值，数据损坏")
                 return None
+
+            # 如果宽度超过限制，等比缩放
+            frame = self._resize_if_needed(frame)
 
             # 使用传入的拍摄时间，如果没有则使用当前时间
             actual_time = capture_time if capture_time is not None else datetime.now()
@@ -263,6 +267,9 @@ class ImageStorage:
             str: Base64编码字符串
         """
         try:
+            # 如果宽度超过限制，等比缩放
+            frame = self._resize_if_needed(frame)
+
             # 编码为JPEG
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
             success, buffer = cv2.imencode('.jpg', frame, encode_param)
@@ -279,6 +286,29 @@ class ImageStorage:
             logger.error(f"图片Base64编码失败: {e}")
             return None
     
+    def _resize_if_needed(self, frame) -> np.ndarray:
+        """
+        如果图片宽度超过最大限制，等比缩放
+
+        Args:
+            frame: 视频帧
+
+        Returns:
+            缩放后的帧（或原帧）
+        """
+        import numpy as np
+        if frame is None:
+            return frame
+
+        height, width = frame.shape[:2]
+        if width > self.max_image_width:
+            scale = self.max_image_width / width
+            new_width = self.max_image_width
+            new_height = int(height * scale)
+            frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            logger.debug(f"图片已缩放: {width}x{height} -> {new_width}x{new_height}")
+        return frame
+
     def _sanitize_filename(self, filename: str) -> str:
         """
         清理文件名中的非法字符

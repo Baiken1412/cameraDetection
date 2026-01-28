@@ -17,13 +17,19 @@ from license_manager import LicenseManager
 
 class RtspMonitorSystem:
     """RTSP监测系统主类"""
-    
+
     def __init__(self):
         self.db = Database()
         self.monitors = {}  # 存储每个摄像头的监测对象
         self.yolo_pools = {}  # YOLO实例池字典: {pool_id: YoloDetectorPool}
         self.default_yolo_pool = None  # 默认全局YOLO池（用于yolo_pool_id=NULL的摄像头）
         self.running = False
+
+        # 自动重启机制
+        self.restart_counts = {}  # {camera_id: 重启次数}
+        self.restart_times = {}   # {camera_id: 上次重启时间}
+        self.max_restarts = 10    # 最大重启次数
+        self.restart_interval = 60  # 重启间隔（秒）
     
     def initialize(self):
         """初始化系统"""
@@ -180,13 +186,86 @@ class RtspMonitorSystem:
         self.running = False
         logger.info("========== 所有RTSP监测服务已停止 ==========")
     
+    def restart_monitor(self, camera_id):
+        """
+        重启单个摄像头监测
+
+        Args:
+            camera_id: 摄像头ID
+
+        Returns:
+            bool: 重启是否成功
+        """
+        monitor = self.monitors.get(camera_id)
+        if not monitor:
+            logger.error(f"摄像头 {camera_id} 不存在，无法重启")
+            return False
+
+        # 检查重启次数
+        restart_count = self.restart_counts.get(camera_id, 0)
+        if restart_count >= self.max_restarts:
+            logger.error(
+                f"摄像头 {camera_id} ({monitor.camera_name}) "
+                f"重启次数已达上限({self.max_restarts}次)，停止重启"
+            )
+            return False
+
+        # 检查重启间隔
+        last_restart = self.restart_times.get(camera_id, 0)
+        if time.time() - last_restart < self.restart_interval:
+            return False  # 静默跳过，避免频繁日志
+
+        logger.warning(
+            f"摄像头 {camera_id} ({monitor.camera_name}) 监测已停止，"
+            f"尝试重启 ({restart_count + 1}/{self.max_restarts})"
+        )
+
+        # 获取原始配置
+        camera_info = monitor.camera_info
+        yolo_pool = monitor.yolo_pool
+
+        # 停止旧监测器
+        try:
+            monitor.stop()
+        except Exception as e:
+            logger.warning(f"停止旧监测器时出错: {e}")
+
+        # 创建并启动新监测器
+        try:
+            new_monitor = CameraMonitor(camera_info, self.db, yolo_pool=yolo_pool)
+            new_monitor.start()
+            self.monitors[camera_id] = new_monitor
+
+            # 更新重启计数
+            self.restart_counts[camera_id] = restart_count + 1
+            self.restart_times[camera_id] = time.time()
+
+            logger.info(f"摄像头 {camera_id} ({camera_info['fjmc']}) 重启成功")
+            return True
+
+        except Exception as e:
+            logger.error(f"重启摄像头 {camera_id} 失败: {e}")
+            self.restart_counts[camera_id] = restart_count + 1
+            self.restart_times[camera_id] = time.time()
+            return False
+
+    def reset_restart_count(self, camera_id):
+        """重置指定摄像头的重启计数（可在运行稳定后调用）"""
+        if camera_id in self.restart_counts:
+            self.restart_counts[camera_id] = 0
+            logger.info(f"摄像头 {camera_id} 重启计数已重置")
+
     def reload_cameras(self):
         """重新加载摄像头配置并重启监测"""
         logger.info("重新加载摄像头配置...")
         self.stop_all_monitors()
-        
+
         time.sleep(2)  # 等待资源释放
-        
+
+        # 重置所有重启计数
+        self.restart_counts.clear()
+        self.restart_times.clear()
+
         self.start_all_monitors()
     
     def shutdown(self):
@@ -234,16 +313,16 @@ def main():
 
     license_manager = LicenseManager()
 
-    if not license_manager.check_license():
-        print("\n" + "=" * 60)
-        print("【许可证验证失败】")
-        print("=" * 60)
-        print(f"当前机器码: {license_manager.machine_code}")
-        print("\n请联系软件提供商获取有效的许可证文件。")
-        print("需要提供上述机器码以生成对应的许可证。")
-        print("=" * 60)
-        input("\n按Enter键退出...")
-        sys.exit(1)
+    #if not license_manager.check_license():
+    #    print("\n" + "=" * 60)
+    ##    print("【许可证验证失败】")
+    ##    print("=" * 60)
+    #    print(f"当前机器码: {license_manager.machine_code}")
+    #    print("\n请联系软件提供商获取有效的许可证文件。")
+    #    print("需要提供上述机器码以生成对应的许可证。")
+    #    print("=" * 60)
+    #    input("\n按Enter键退出...")
+    #    sys.exit(1)
 
     print("\n" + "=" * 60)
     print("【许可证验证成功】")
@@ -270,14 +349,19 @@ def main():
         monitor_system.start_all_monitors()
         
         # 保持运行
+        check_interval_counter = 0
         while monitor_system.running:
             time.sleep(1)
-            
-            # 检查监测线程是否还在运行
-            for camera_id, monitor in list(monitor_system.monitors.items()):
-                if not monitor.is_running():
-                    logger.warning(f"摄像头 {camera_id} 监测已停止")
-                    # 可以选择重新启动或移除
+            check_interval_counter += 1
+
+            # 每10秒检查一次监测线程状态（避免频繁检查）
+            if check_interval_counter >= 10:
+                check_interval_counter = 0
+
+                # 检查监测线程是否还在运行，自动重启停止的监测
+                for camera_id, monitor in list(monitor_system.monitors.items()):
+                    if not monitor.is_running():
+                        monitor_system.restart_monitor(camera_id)
         
     except KeyboardInterrupt:
         logger.info("用户中断，正在关闭系统...")

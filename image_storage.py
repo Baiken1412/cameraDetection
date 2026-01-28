@@ -3,6 +3,7 @@
 支持保存到文件系统或转换为Base64存储到数据库
 """
 import cv2
+import numpy as np
 import base64
 import os
 from datetime import datetime

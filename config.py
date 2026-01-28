@@ -75,7 +75,7 @@ RTSP_MONITOR_CONFIG = {
     'reconnect_interval': 5,
     
     # 最大重连次数
-    'max_reconnect_attempts': 3,
+    'max_reconnect_attempts': 10,
     
     # 图片保存路径（本地文件系统路径，绝对路径）
     'image_save_path': 'D:/appdata/uploadPath/caseapp',  # 例如: 'D:/ruoyi/uploadPath/caseapp'

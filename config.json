@@ -99,7 +99,7 @@
     "use_multiprocess": true
   },
   "INPUT_SHAPER_CONFIG": {
-    "enabled": true,
+    "enabled": false,
     "target_fps": 2.0,
     "buffer_size": 30,
     "drop_strategy": "drop_old",

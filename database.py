@@ -267,29 +267,48 @@ class Database:
         rysl: Optional[int] = None,
     ) -> Optional[int]:
         """
-        保存监测记录 (线程安全)
+        保存监测记录 (线程安全，带去重)
         """
         conn = self._get_conn()
         if not conn:
             logger.error(f"保存监测记录失败 - 无法获取数据库连接")
             return None
 
-        sql = """
-            INSERT INTO app_track (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
         try:
             with conn.cursor() as cursor:
+                # 【去重检查】同一摄像头的相同图片不重复插入
+                check_sql = """
+                    SELECT id, jscs FROM app_track
+                    WHERE pstp = %s AND qyid = %s
+                    LIMIT 1
+                """
+                cursor.execute(check_sql, (pstp, qyid))
+                existing = cursor.fetchone()
+
+                if existing:
+                    # 已存在相同图片，更新检测次数而不是新建记录
+                    logger.warning(
+                        f"检测到重复图片，合并到已有记录 - "
+                        f"图片: {pstp}, 已有记录ID: {existing['id']}, 摄像头: {sxtmx}"
+                    )
+                    update_sql = "UPDATE app_track SET jscs = jscs + 1, jssj = %s WHERE id = %s"
+                    cursor.execute(update_sql, (pssj, existing['id']))
+                    return existing['id']
+
+                # 不存在则正常插入
+                insert_sql = """
+                    INSERT INTO app_track (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
                 jssj = pssj + timedelta(seconds=5)
                 jscs = 1  # 初始检测次数为1
                 bzzt = '0'  # 默认为待标注状态
                 track_duration = 5  # 初始轨迹时长为5秒
                 long_track_threshold = config.RTSP_MONITOR_CONFIG.get('long_track_threshold', 60)
                 is_long_track = 1 if track_duration >= long_track_threshold else 0
-                cursor.execute(sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track))
+                cursor.execute(insert_sql, (pssj, jssj, pstp, qyid, qymc, sxtmx, rysl, jscs, bzzt, track_duration, is_long_track))
                 record_id = cursor.lastrowid
-                
+
                 logger.info(f"保存监测记录成功 - 摄像头: {sxtmx} (ID: {qyid}), 区域: {qymc}, 记录ID: {record_id}, 时间: {pssj}")
 
                 # 触发Java系统生成复合事件（异步调用，不影响主流程）

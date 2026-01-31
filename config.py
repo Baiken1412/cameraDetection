@@ -122,7 +122,7 @@ RTSP_MONITOR_CONFIG = {
     # 最小变化区域面积（像素数），小于此值的变化区域将被忽略
     # 降低此值可以提高敏感度，但可能增加噪声
     # 如果原始前景比例较高但处理后为0，说明过滤太激进，应该降低此值
-    'min_change_area': 500,  # 从100降低到50，减少过滤
+    'min_change_area': 500,  # 从500降低到150，减少过滤
 
     # 摄像头配置获取接口（代替直接查询 app_roomip 表）
     # 说明：系统通过此接口获取所有摄像头的 RTSP 实时流地址
@@ -153,7 +153,7 @@ RTSP_MONITOR_CONFIG = {
     'recent_records_minutes': 30,  # 默认显示最近30分钟的记录
 
     # USB摄像头支持
-    'enable_usb_camera': True,  # 是否启用USB摄像头
+    'enable_usb_camera': False,  # 是否启用USB摄像头
     'usb_camera_id': 0,  # USB摄像头设备ID（通常是0，如果有多个摄像头可以是1,2等）
     'usb_camera_name': 'USB摄像头',  # USB摄像头名称
     'usb_camera_area': 'USB监控区域'  # USB摄像头监控区域名称

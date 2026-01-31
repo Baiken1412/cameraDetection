@@ -42,7 +42,7 @@
     "bg_var_threshold": 10,
     "bg_detect_shadows": true,
     "recent_records_minutes": 30,
-    "enable_usb_camera": true,
+    "enable_usb_camera": false,
     "usb_camera_id": 0,
     "usb_camera_name": "USB摄像头",
     "usb_camera_area": "USB监控区域",

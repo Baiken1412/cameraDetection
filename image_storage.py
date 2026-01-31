@@ -133,9 +133,9 @@ class ImageStorage:
             save_dir = Path(self.image_save_path) / date_dir
             save_dir.mkdir(parents=True, exist_ok=True)
 
-            # 生成文件名：摄像头ID_摄像头名称_时间戳.jpg
-            # ✅ 使用准确的拍摄时间，而不是当前系统时间
-            timestamp = actual_time.strftime('%Y%m%d%H%M%S')
+            # 生成文件名：摄像头ID_摄像头名称_时间戳_毫秒.jpg
+            # ✅ 使用准确的拍摄时间，增加毫秒精度防止同秒覆盖
+            timestamp = actual_time.strftime('%Y%m%d%H%M%S') + f"_{actual_time.microsecond // 1000:03d}"
             # 清理文件名中的非法字符
             safe_name = self._sanitize_filename(camera_name)
             filename = f"{camera_id}_{safe_name}_{timestamp}.jpg"

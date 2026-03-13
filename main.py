@@ -8,6 +8,7 @@ import multiprocessing
 import signal
 import sys
 import time
+from datetime import datetime, date
 from loguru import logger
 import config_loader as config
 from database import Database
@@ -250,6 +251,30 @@ class RtspMonitorSystem:
             self.restart_times[camera_id] = time.time()
             return False
 
+    def restart_yolo_pools(self):
+        """
+        重启所有 YOLO 进程池（用于定时清理子进程内存积累）。
+        摄像头监测线程持有的池引用不变，重启期间检测请求会快速失败并在下次检测时自动重试。
+        """
+        logger.info("========== 触发 YOLO 进程池定时重启 ==========")
+
+        if self.default_yolo_pool is not None and hasattr(self.default_yolo_pool, 'restart_workers'):
+            try:
+                self.default_yolo_pool.restart_workers()
+                logger.info("默认 YOLO 池重启完成")
+            except Exception as e:
+                logger.error(f"重启默认 YOLO 池失败: {e}")
+
+        for pool_id, pool in self.yolo_pools.items():
+            if hasattr(pool, 'restart_workers'):
+                try:
+                    pool.restart_workers()
+                    logger.info(f"YOLO 池 {pool_id} 重启完成")
+                except Exception as e:
+                    logger.error(f"重启 YOLO 池 {pool_id} 失败: {e}")
+
+        logger.info("========== YOLO 进程池定时重启完成 ==========")
+
     def reset_restart_count(self, camera_id):
         """重置指定摄像头的重启计数（可在运行稳定后调用）"""
         if camera_id in self.restart_counts:
@@ -351,6 +376,10 @@ def main():
         
         # 保持运行
         check_interval_counter = 0
+        last_pool_restart_date = None  # 记录上次重启进程池的日期，防止同一天重复重启
+        pool_restart_time_str = config.YOLO_POOL_CONFIG.get('restart_time', '')  # 如 "02:00"
+        use_multiprocess = config.YOLO_POOL_CONFIG.get('use_multiprocess', False)
+
         while monitor_system.running:
             time.sleep(1)
             check_interval_counter += 1
@@ -377,6 +406,20 @@ def main():
                                         f"摄像头 {camera_id} ({monitor.camera_name}) "
                                         f"稳定运行超过1小时，重启计数已重置 ({old_count} → 0)"
                                     )
+
+            # 定时重启 YOLO 进程池（仅多进程模式下有效）
+            if use_multiprocess and pool_restart_time_str:
+                try:
+                    now = datetime.now()
+                    today = now.date()
+                    restart_h, restart_m = map(int, pool_restart_time_str.split(':'))
+                    # 到达配置时间且今天还未重启过
+                    if now.hour == restart_h and now.minute == restart_m and last_pool_restart_date != today:
+                        logger.info(f"到达定时重启时间 {pool_restart_time_str}，开始重启 YOLO 进程池")
+                        monitor_system.restart_yolo_pools()
+                        last_pool_restart_date = today
+                except Exception as e:
+                    logger.error(f"定时重启 YOLO 进程池时发生异常: {e}")
         
     except KeyboardInterrupt:
         logger.info("用户中断，正在关闭系统...")

@@ -19,7 +19,7 @@
     "buffer_flush_max_frames": 150,
     "buffer_flush_after_yolo_frames": 100,
     "reconnect_interval": 5,
-    "max_reconnect_attempts": 3,
+    "max_reconnect_attempts": 999,
     "image_save_path": "D:/appdata/uploadPath/caseapp",
     "image_url_prefix": "",
     "save_image_to_file": true,
@@ -42,7 +42,7 @@
     "bg_var_threshold": 10,
     "bg_detect_shadows": true,
     "recent_records_minutes": 30,
-    "enable_usb_camera": false,
+    "enable_usb_camera": true,
     "usb_camera_id": 0,
     "usb_camera_name": "USB摄像头",
     "usb_camera_area": "USB监控区域",
@@ -96,7 +96,8 @@
     "pool_size": 2,
     "detector_type": "adaptive",
     "timeout": 30,
-    "use_multiprocess": true
+    "use_multiprocess": true,
+    "restart_time": "02:00"
   },
   "INPUT_SHAPER_CONFIG": {
     "enabled": false,

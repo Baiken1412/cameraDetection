@@ -61,7 +61,7 @@ added_files = [
     ('data', 'data'),
     ('*.sql', '.'),
     ('config.json', '.'),
-    ('使用说明.txt', '.'),
+    ('快速上手.txt', '.'),
 ]
 
 # 所有的二元组 (source, dest)

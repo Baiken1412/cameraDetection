@@ -195,7 +195,8 @@ class VideoStreamReader:
             Tuple[bool, frame, timestamp]: (是否成功, 帧数据, 时间戳)
         """
         with self.lock:
-            if self.latest_frame is not None:
+            # 若读取线程已停止，立即返回失败以触发上层重连逻辑
+            if self.running and self.latest_frame is not None:
                 # 返回最新帧的副本（避免主线程修改影响共享数据）
                 return True, self.latest_frame.copy(), self.latest_timestamp
             else:

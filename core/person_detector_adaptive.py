@@ -200,10 +200,14 @@ class AdaptivePersonDetector:
 
         logger.info(f"ONNX Runtime 模型加载完成，输入尺寸: {self.input_width}x{self.input_height}")
 
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
-        """预处理图像"""
-        # 保存原始尺寸
-        self.orig_height, self.orig_width = image.shape[:2]
+    def preprocess(self, image: np.ndarray):
+        """
+        预处理图像，同时返回原始尺寸（避免用实例变量存储，防止多线程竞态）
+
+        Returns:
+            (input_tensor, orig_width, orig_height)
+        """
+        orig_height, orig_width = image.shape[:2]
 
         # Resize
         img = cv2.resize(image, (self.input_width, self.input_height))
@@ -220,14 +224,16 @@ class AdaptivePersonDetector:
         # 添加 batch 维度
         img = np.expand_dims(img, axis=0)
 
-        return img
+        return img, orig_width, orig_height
 
-    def postprocess(self, outputs: np.ndarray) -> List[Dict]:
+    def postprocess(self, outputs: np.ndarray, orig_width: int, orig_height: int) -> List[Dict]:
         """
         后处理 YOLO 输出
 
         Args:
             outputs: YOLO 模型输出
+            orig_width: 原始图像宽度
+            orig_height: 原始图像高度
 
         Returns:
             检测结果列表 [{'bbox': [x1,y1,x2,y2], 'conf': 0.95, 'class_id': 0}, ...]
@@ -257,9 +263,9 @@ class AdaptivePersonDetector:
         boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2
         boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
 
-        # 缩放到原始图像尺寸
-        boxes_xyxy[:, [0, 2]] *= self.orig_width / self.input_width
-        boxes_xyxy[:, [1, 3]] *= self.orig_height / self.input_height
+        # 缩放到原始图像尺寸（使用局部变量，线程安全）
+        boxes_xyxy[:, [0, 2]] *= orig_width / self.input_width
+        boxes_xyxy[:, [1, 3]] *= orig_height / self.input_height
 
         # NMS
         indices = self.nms(boxes_xyxy, person_scores, self.iou_threshold)
@@ -336,8 +342,8 @@ class AdaptivePersonDetector:
         Returns:
             检测结果列表
         """
-        # 预处理
-        input_tensor = self.preprocess(image)
+        # 预处理（同时获取原始尺寸，避免用实例变量存储）
+        input_tensor, orig_width, orig_height = self.preprocess(image)
 
         # 推理
         if self.engine == InferenceEngine.OPENVINO:
@@ -346,7 +352,7 @@ class AdaptivePersonDetector:
             outputs = self.session.run(self.output_names, {self.input_name: input_tensor})[0]
 
         # 后处理
-        detections = self.postprocess(outputs)
+        detections = self.postprocess(outputs, orig_width, orig_height)
 
         return detections
 

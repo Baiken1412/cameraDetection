@@ -15,7 +15,11 @@
       "Bash(find:*)",
       "Bash(mysql:*)",
       "Bash(ls:*)",
-      "Bash(pip uninstall:*)"
+      "Bash(pip uninstall:*)",
+      "Bash(cd \"D:\\\\work\\\\cameraDetection\\(正在用\\)\" && cmd /c build_main_exe.bat 2>&1)",
+      "Bash(ls \"D:\\\\work\\\\cameraDetection\\(正在用\\)\"/*.txt 2>&1)",
+      "Bash(ls -la \"D:\\\\work\\\\cameraDetection\\(正在用\\)/models\" \"D:\\\\work\\\\cameraDetection\\(正在用\\)/static\" \"D:\\\\work\\\\cameraDetection\\(正在用\\)/templates\" \"D:\\\\work\\\\cameraDetection\\(正在用\\)/data\" 2>&1 | head -20)",
+      "Bash(ls \"D:\\\\work\\\\cameraDetection\\(正在用\\)\"/templates/ 2>&1 && ls \"D:\\\\work\\\\cameraDetection\\(正在用\\)\"/*.sql 2>&1)"
     ]
   }
 }

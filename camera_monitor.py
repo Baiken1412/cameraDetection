@@ -92,7 +92,7 @@ class CameraMonitor:
         self.detection_mode = 'fast'
         self.no_person_count = 0
         self.slow_mode_interval = 10
-        self.no_person_threshold = 30
+        self.no_person_threshold = 5   # 原来30次才切回快速，改为5次（最多50秒就能恢复快速检测）
 
         # 异步任务队列 (frame, time, detections)
         self.task_queue = queue.Queue(maxsize=100)

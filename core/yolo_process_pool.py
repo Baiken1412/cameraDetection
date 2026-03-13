@@ -361,6 +361,82 @@ class YoloProcessPool:
 
         return stats
 
+    def restart_workers(self):
+        """
+        重启所有 Worker 进程，释放长时间运行积累的内存。
+        定时调用（如每天凌晨），不影响主进程和摄像头监测线程的正常运行。
+        """
+        logger.info("========== 开始重启 YOLO Worker 进程（定时清理内存） ==========")
+
+        # 1. 发送毒丸信号，通知所有 Worker 退出
+        for _ in range(len(self.workers)):
+            try:
+                self.task_queue.put(None, timeout=1.0)
+            except Exception:
+                pass
+
+        # 2. 等待 Worker 进程退出（最多10秒）
+        for i, p in enumerate(self.workers):
+            p.join(timeout=10)
+            if p.is_alive():
+                logger.warning(f"YOLO Worker #{i} 未能正常退出，强制终止")
+                p.terminate()
+                p.join(timeout=2)
+
+        # 3. 通知所有正在等待的检测请求，让它们立即失败返回（避免永久阻塞）
+        with self._pending_lock:
+            for request_id, event in list(self._pending_requests.items()):
+                self._pending_results[request_id] = {
+                    'request_id': request_id,
+                    'success': False,
+                    'error': 'YOLO进程池重启中，请稍后重试'
+                }
+                event.set()
+            self._pending_requests.clear()
+            self._pending_results.clear()
+
+        # 4. 清空任务队列和结果队列中的残余数据
+        for q in (self.task_queue, self.result_queue):
+            try:
+                while True:
+                    q.get_nowait()
+            except Exception:
+                pass
+
+        # 5. 重新启动 Worker 进程
+        self.workers = []
+        self.ready_events = []
+
+        logger.info(f"正在重新启动 {self.pool_size} 个 YOLO Worker 进程...")
+        for i in range(self.pool_size):
+            ready_event = multiprocessing.Event()
+            self.ready_events.append(ready_event)
+
+            p = multiprocessing.Process(
+                target=_worker_process,
+                args=(i, self.task_queue, self.result_queue, self.detector_config, ready_event),
+                name=f"YoloWorker-{i}"
+            )
+            p.daemon = True
+            p.start()
+            self.workers.append(p)
+            logger.info(f"YOLO Worker #{i} 重启完成 (PID: {p.pid})")
+
+        # 6. 等待所有 Worker 初始化完成（最多60秒）
+        for i, event in enumerate(self.ready_events):
+            if not event.wait(timeout=60):
+                logger.warning(f"YOLO Worker #{i} 重启后初始化超时")
+
+        # 7. 重置统计信息
+        self.stats = {
+            'total_detections': 0,
+            'total_wait_time': 0.0,
+            'max_wait_time': 0.0,
+            'created_at': datetime.now()
+        }
+
+        logger.info("========== YOLO Worker 进程重启完成 ==========")
+
     def shutdown(self):
         """关闭进程池"""
         if not self.running:

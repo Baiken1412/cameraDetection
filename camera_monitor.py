@@ -481,16 +481,10 @@ class CameraMonitor:
             rtsp_url = self._prepare_rtsp_url(self.rtsp_url, 'tcp')
             rtsp_timeout_ms = self.config.get('rtsp_timeout', 30) * 1000
 
-            # 必须先 set 超时，再 open —— VideoCapture(url) 构造时就发起连接，之后 set 无效
-            self.cap = cv2.VideoCapture()
-            try:
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, rtsp_timeout_ms)  # 连接超时（构造前设置才生效）
-                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout_ms)  # 读取超时，防止掉线时 cap.read() 永久阻塞
-            except: pass
-            backend = cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 1900
-            self.cap.open(rtsp_url, backend)
+            self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 1900)
             try:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout_ms)  # 读取超时，防止掉线时 cap.read() 永久阻塞
             except: pass
 
             time.sleep(1.0)

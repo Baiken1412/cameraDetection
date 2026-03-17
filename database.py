@@ -311,9 +311,15 @@ class Database:
 
                 logger.info(f"保存监测记录成功 - 摄像头: {sxtmx} (ID: {qyid}), 区域: {qymc}, 记录ID: {record_id}, 时间: {pssj}")
 
-                # 触发Java系统生成复合事件（异步调用，不影响主流程）
+                # 触发Java系统生成复合事件（在独立daemon线程中执行，不阻塞工作线程）
                 try:
-                    self.trigger_event_sync(record_id)
+                    import threading
+                    t = threading.Thread(
+                        target=self.trigger_event_sync,
+                        args=(record_id,),
+                        daemon=True
+                    )
+                    t.start()
                 except Exception as e:
                     logger.warning(f"触发复合事件生成失败（不影响轨迹保存）: {e}")
 

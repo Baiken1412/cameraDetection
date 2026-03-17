@@ -108,8 +108,9 @@ class AdaptivePersonDetector:
         # 支持 YOLOv8 和 YOLOv11，以及 openvino_model 子目录
         xml_files = list(self.model_dir.glob("yolo11*.xml")) + list(self.model_dir.glob("yolov8*.xml"))
         if not xml_files:
-            # 尝试在 openvino_model 子目录中查找
-            xml_files = list(self.model_dir.glob("*_openvino_model/*.xml"))
+            # 尝试在子目录中查找（*_openvino_model 或 *_openvino）
+            xml_files = (list(self.model_dir.glob("*_openvino_model/*.xml"))
+                         + list(self.model_dir.glob("*_openvino/*.xml")))
 
         if not xml_files:
             raise FileNotFoundError(

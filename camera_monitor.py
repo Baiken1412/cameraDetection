@@ -99,6 +99,10 @@ class CameraMonitor:
         self.worker_thread = None
 
         self.reconnect_attempts = 0
+
+        # 丢帧统计（队列满时）
+        self._drop_count = 0
+        self._drop_log_interval = 50  # 每丢50帧打一次告警
     
     def start(self):
         """启动监测"""
@@ -203,18 +207,24 @@ class CameraMonitor:
 
     def _monitor_loop(self):
         """监测主循环"""
-        while self.running and self.reconnect_attempts < self.config['max_reconnect_attempts']:
+        while self.running:
             try:
                 # 连接RTSP流
                 if not self._connect_rtsp():
                     self.reconnect_attempts += 1
-                    if self.reconnect_attempts < self.config['max_reconnect_attempts']:
+                    max_attempts = self.config['max_reconnect_attempts']
+                    if self.reconnect_attempts >= max_attempts:
+                        logger.warning(
+                            f"摄像头 {self.camera_name} 已重试 {self.reconnect_attempts} 次，重置计数继续重连..."
+                        )
+                        self.reconnect_attempts = 0
+                    else:
                         logger.warning(
                             f"摄像头 {self.camera_name} 连接失败，"
                             f"{self.config['reconnect_interval']}秒后重试 "
-                            f"(尝试 {self.reconnect_attempts}/{self.config['max_reconnect_attempts']})"
+                            f"(尝试 {self.reconnect_attempts}/{max_attempts})"
                         )
-                        time.sleep(self.config['reconnect_interval'])
+                    time.sleep(self.config['reconnect_interval'])
                     continue
                 
                 self.reconnect_attempts = 0
@@ -234,11 +244,11 @@ class CameraMonitor:
                     learning_time = 30
                 
                 if not self.detection.bg_initialized:
-                    # 简化的初始化逻辑
                     history = self.config.get('bg_history', 500)
                     var_threshold = self.config.get('bg_var_threshold', 16)
+                    detect_shadows = self.config.get('bg_detect_shadows', False)
                     self.detection.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                        history=history, varThreshold=var_threshold, detectShadows=True
+                        history=history, varThreshold=var_threshold, detectShadows=detect_shadows
                     )
                     self.detection.bg_initialized = True
                 
@@ -309,11 +319,27 @@ class CameraMonitor:
 
                             # 6. 有效性判断
                             if detections is None or people_count <= 0:
+                                self.no_person_count += 1
                                 if self.detection_mode == 'slow':
-                                    self.no_person_count += 1
+                                    # 慢速模式：连续N次无人 → 切回快速
                                     if self.no_person_count >= self.no_person_threshold:
                                         self.detection_mode = 'fast'
                                         self.no_person_count = 0
+                                else:
+                                    # 快速模式：连续N*3次（默认15次）"有前景但YOLO无人"
+                                    # 根本原因：背景模型在学习阶段把运动中的人学成了背景，
+                                    # 之后被冻结（learningRate=0），导致持续误报。
+                                    # 正确处理：重置背景模型，触发30秒重新学习，不降速。
+                                    fast_no_person_limit = self.no_person_threshold * 3
+                                    if self.no_person_count >= fast_no_person_limit:
+                                        self.no_person_count = 0
+                                        logger.warning(
+                                            f"[{self.camera_name}] 连续 {fast_no_person_limit} 次"
+                                            f"检测到变化但 YOLO 无人，背景模型可能已失效，"
+                                            f"重置并重新学习（30秒）..."
+                                        )
+                                        self.detection.reset()  # 重置背景模型
+                                        break  # 跳出内层检测循环，触发外层重新学习阶段
                                 continue
 
                             # 7. 冷却检查
@@ -328,7 +354,15 @@ class CameraMonitor:
                             if not self.task_queue.full():
                                 self.task_queue.put((frame.copy(), frame_time, detections))
                             else:
-                                logger.warning(f"队列已满，丢帧 - {self.camera_name}")
+                                self._drop_count += 1
+                                if self._drop_count % self._drop_log_interval == 0:
+                                    logger.error(
+                                        f"⚠️  [{self.camera_name}] 后台队列持续积压，"
+                                        f"已累计丢弃 {self._drop_count} 帧！"
+                                        f"可能原因：工作线程处理过慢（HTTP超时/磁盘慢）"
+                                    )
+                                else:
+                                    logger.warning(f"队列已满，丢帧 - {self.camera_name}")
 
                             # 切换模式
                             if self.detection_mode == 'fast':
@@ -347,8 +381,6 @@ class CameraMonitor:
                 logger.error(f"监测异常: {e}")
                 self.reconnect_attempts += 1
                 time.sleep(self.config['reconnect_interval'])
-        
-        self.running = False
 
     # =========================================================================
     # 以下为被恢复的连接和辅助方法
@@ -370,8 +402,9 @@ class CameraMonitor:
         return urls
 
     def _prepare_rtsp_url(self, url: str, transport: str = 'tcp') -> str:
-        separator = '&' if '?' in url else '?'
-        return f"{url}{separator}rtsp_transport={transport}"
+        # TCP 传输已通过环境变量 OPENCV_FFMPEG_CAPTURE_OPTIONS 全局设置
+        # 不再拼接到 URL，避免部分摄像头 RTSP 服务器因 URL 带查询参数而返回 500 错误
+        return url
 
     def _connect_usb_camera(self) -> bool:
         """连接USB摄像头"""
@@ -445,15 +478,19 @@ class CameraMonitor:
             
             # 使用OpenCV连接
             logger.info(f"正在连接RTSP流: {self.rtsp_url}")
-            # 强制 TCP
             rtsp_url = self._prepare_rtsp_url(self.rtsp_url, 'tcp')
-            
-            self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 1900)
-            
-            # 设置缓冲区
+            rtsp_timeout_ms = self.config.get('rtsp_timeout', 30) * 1000
+
+            # 必须先 set 超时，再 open —— VideoCapture(url) 构造时就发起连接，之后 set 无效
+            self.cap = cv2.VideoCapture()
             try:
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3) # 尽可能小
-                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.config.get('rtsp_timeout', 30) * 1000)
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, rtsp_timeout_ms)  # 连接超时（构造前设置才生效）
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout_ms)  # 读取超时，防止掉线时 cap.read() 永久阻塞
+            except: pass
+            backend = cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 1900
+            self.cap.open(rtsp_url, backend)
+            try:
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
             except: pass
 
             time.sleep(1.0)

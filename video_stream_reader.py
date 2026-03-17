@@ -106,19 +106,17 @@ class VideoStreamReader:
 
         self.started = True
         consecutive_failures = 0
-        max_consecutive_failures = 10  # 连续失败10次则停止
+        max_consecutive_failures = 60  # 连续失败60次（约60秒）才放弃，容忍短暂网络抖动
 
         while self.running:
             try:
                 if self.cap is None or not self.cap.isOpened():
-                    logger.warning(
-                        f"[{self.camera_name}] VideoStreamReader: VideoCapture未打开，线程休眠中..."
-                    )
                     time.sleep(1)
                     consecutive_failures += 1
                     if consecutive_failures >= max_consecutive_failures:
                         logger.error(
-                            f"[{self.camera_name}] VideoStreamReader: 连续失败{consecutive_failures}次，停止线程"
+                            f"[{self.camera_name}] VideoStreamReader: "
+                            f"连续 {consecutive_failures} 秒无法读取，停止线程触发重连"
                         )
                         break
                     continue
@@ -158,22 +156,18 @@ class VideoStreamReader:
                             self.last_stats_log_time = current_time
                             pass
                 else:
-                    # 读取失败
+                    # 读取失败（网络抖动或断开）
                     consecutive_failures += 1
-                    logger.debug(
-                        f"[{self.camera_name}] VideoStreamReader: 读取帧失败 "
-                        f"(连续失败{consecutive_failures}次)"
-                    )
 
                     if consecutive_failures >= max_consecutive_failures:
                         logger.error(
                             f"[{self.camera_name}] VideoStreamReader: "
-                            f"连续失败{consecutive_failures}次，停止线程"
+                            f"连续 {consecutive_failures} 次读取失败，停止线程触发重连"
                         )
                         break
 
-                    # 失败后短暂休眠
-                    time.sleep(0.001)
+                    # 失败后短暂休眠（避免CPU空转）
+                    time.sleep(0.1)
 
                 # 极短休眠，让出CPU（避免100%占用）
                 # 但不能太长，否则会积压缓冲区

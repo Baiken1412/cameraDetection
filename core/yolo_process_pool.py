@@ -201,6 +201,14 @@ class YoloProcessPool:
         )
         self._result_collector.start()
 
+        # 启动 worker 健康监控线程（自动重启死掉的 worker 进程）
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop,
+            name="YoloWorkerWatchdog",
+            daemon=True
+        )
+        self._watchdog.start()
+
         # 统计信息
         self.stats = {
             'total_detections': 0,
@@ -258,6 +266,40 @@ class YoloProcessPool:
             except Exception as e:
                 if self._result_collector_running:
                     logger.error(f"结果收集线程异常: {e}")
+
+    def _watchdog_loop(self):
+        """
+        Worker 健康监控线程：每30秒检查一次，发现死掉的 worker 立即重启。
+        防止 worker 进程因 OOM 等原因被系统杀死后长时间无人处理任务。
+        """
+        while self._result_collector_running:
+            time.sleep(30)
+            if not self._result_collector_running:
+                break
+            for i, p in enumerate(self.workers):
+                if not p.is_alive():
+                    logger.error(
+                        f"⚠️  YOLO Worker #{i} (PID: {p.pid}) 已死亡！正在自动重启..."
+                    )
+                    try:
+                        ready_event = multiprocessing.Event()
+                        new_p = multiprocessing.Process(
+                            target=_worker_process,
+                            args=(i, self.task_queue, self.result_queue,
+                                  self.detector_config, ready_event),
+                            name=f"YoloWorker-{i}"
+                        )
+                        new_p.daemon = True
+                        new_p.start()
+                        self.workers[i] = new_p
+                        self.ready_events[i] = ready_event
+                        # 等待初始化（最多60秒）
+                        if ready_event.wait(timeout=60):
+                            logger.info(f"YOLO Worker #{i} 自动重启成功 (PID: {new_p.pid})")
+                        else:
+                            logger.warning(f"YOLO Worker #{i} 自动重启后初始化超时")
+                    except Exception as e:
+                        logger.error(f"YOLO Worker #{i} 自动重启失败: {e}")
 
     def detect(self, frame, timeout: float = None) -> List[Dict]:
         """

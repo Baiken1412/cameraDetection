@@ -3,7 +3,7 @@ RTSP视频流监测系统 - 主程序
 使用背景建模法进行检测
 """
 import os
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;0"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;30000000"
 import multiprocessing
 import signal
 import sys
@@ -203,23 +203,22 @@ class RtspMonitorSystem:
             logger.error(f"摄像头 {camera_id} 不存在，无法重启")
             return False
 
-        # 检查重启次数
-        restart_count = self.restart_counts.get(camera_id, 0)
-        if restart_count >= self.max_restarts:
-            logger.error(
-                f"摄像头 {camera_id} ({monitor.camera_name}) "
-                f"重启次数已达上限({self.max_restarts}次)，停止重启"
-            )
-            return False
-
         # 检查重启间隔
         last_restart = self.restart_times.get(camera_id, 0)
-        if time.time() - last_restart < self.restart_interval:
+        now = time.time()
+
+        # 如果距上次重启超过10分钟，说明上次已经稳定运行过，重置计数
+        if now - last_restart > 600:
+            self.restart_counts[camera_id] = 0
+
+        restart_count = self.restart_counts.get(camera_id, 0)
+
+        if now - last_restart < self.restart_interval:
             return False  # 静默跳过，避免频繁日志
 
         logger.warning(
             f"摄像头 {camera_id} ({monitor.camera_name}) 监测已停止，"
-            f"尝试重启 ({restart_count + 1}/{self.max_restarts})"
+            f"尝试重启 (第 {restart_count + 1} 次)"
         )
 
         # 获取原始配置
@@ -339,16 +338,16 @@ def main():
 
     license_manager = LicenseManager()
 
-    #if not license_manager.check_license():
-    #    print("\n" + "=" * 60)
-    ##    print("【许可证验证失败】")
-    ##    print("=" * 60)
-    #    print(f"当前机器码: {license_manager.machine_code}")
-    #    print("\n请联系软件提供商获取有效的许可证文件。")
-    #    print("需要提供上述机器码以生成对应的许可证。")
-    #    print("=" * 60)
-    #    input("\n按Enter键退出...")
-    #    sys.exit(1)
+    if not license_manager.check_license():
+        print("\n" + "=" * 60)
+        print("【许可证验证失败】")
+        print("=" * 60)
+        print(f"当前机器码: {license_manager.machine_code}")
+        print("\n请联系软件提供商获取有效的许可证文件。")
+        print("需要提供上述机器码以生成对应的许可证。")
+        print("=" * 60)
+        input("\n按Enter键退出...")
+        sys.exit(1)
 
     print("\n" + "=" * 60)
     print("【许可证验证成功】")

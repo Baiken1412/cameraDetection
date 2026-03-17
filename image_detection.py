@@ -3,6 +3,7 @@
 使用背景建模法（Background Subtraction）检测画面变化
 """
 import random
+import time
 import cv2
 import numpy as np
 from loguru import logger
@@ -11,24 +12,31 @@ import config_loader as config
 
 class ImageChangeDetection:
     """图像变化检测类 - 仅使用背景建模法"""
-    
+
     def __init__(self):
         self.config = config.RTSP_MONITOR_CONFIG
         self.threshold = self.config['change_threshold']
         self.morphology_operation = self.config.get('morphology_operation', 1)
         self.min_change_area = self.config.get('min_change_area', 100)
         self.consecutive_frames_threshold = self.config.get('consecutive_frames_threshold', 2)
-        
+
         # 用于连续帧检测的计数器
         self.consecutive_change_count = 0
-        
+
         # 缓存最后一次计算的前景比例（避免重复计算）
         self.last_change_ratio = None
-        
+
         # 背景建模器（延迟初始化）
         self.bg_subtractor = None
         self.bg_initialized = False
-        
+
+        # 防止背景模型长时间冻结：记录上次强制更新背景的时间
+        self._last_forced_bg_update = time.time()
+        # 强制更新间隔（秒），默认5分钟；可通过 bg_force_update_interval 配置
+        self._forced_bg_update_interval = self.config.get('bg_force_update_interval', 300)
+        # 强制更新时使用的极小学习率，足够缓慢更新背景，不至于把前景学进去
+        self._forced_bg_learning_rate = self.config.get('bg_forced_learning_rate', 0.0001)
+
         logger.info("初始化背景建模检测器")
     
     def detect_change(self, current_frame, previous_frame=None):
@@ -129,15 +137,27 @@ class ImageChangeDetection:
             temp_fg_ratio = np.count_nonzero(temp_mask) / temp_mask.size if temp_mask.size > 0 else 0
             
             # 根据前景比例决定是否更新背景模型
+            now = time.time()
+            force_update = (now - self._last_forced_bg_update) >= self._forced_bg_update_interval
+
             if temp_fg_ratio > self.threshold:  # 如果检测到前景
-                # 有运动物体，暂停背景学习，避免把前景学习成背景
-                # 直接使用第一次检测的结果，不再更新背景模型
-                fg_mask = temp_mask
-                logger.debug(f"检测到前景 ({temp_fg_ratio*100:.3f}%)，暂停背景学习，避免前景被学习成背景")
+                if force_update:
+                    # 长时间未更新背景（默认5分钟），用极小学习率强制更新一次
+                    # 防止光照缓慢变化导致背景模型永久冻结，进而产生大量误报
+                    fg_mask = self.bg_subtractor.apply(current_frame, learningRate=self._forced_bg_learning_rate)
+                    self._last_forced_bg_update = now
+                    logger.debug(
+                        f"背景模型强制更新（距上次 {now - self._last_forced_bg_update + self._forced_bg_update_interval:.0f}s），"
+                        f"learningRate={self._forced_bg_learning_rate}"
+                    )
+                else:
+                    # 有运动物体，暂停背景学习，避免把前景学习成背景
+                    fg_mask = temp_mask
+                    logger.debug(f"检测到前景 ({temp_fg_ratio*100:.3f}%)，暂停背景学习，避免前景被学习成背景")
             else:
                 # 无运动物体，正常学习率更新背景模型
-                # 重新应用一次，这次会更新背景模型
                 fg_mask = self.bg_subtractor.apply(current_frame, learningRate=base_learning_rate)
+                self._last_forced_bg_update = now  # 正常更新时也刷新计时器
             
             # 调试输出：定期输出前景掩码统计信息（处理前）
             fg_pixels_before = np.count_nonzero(fg_mask)

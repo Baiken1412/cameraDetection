@@ -475,7 +475,20 @@ class CameraMonitor:
 
             if self.is_usb_camera:
                 return self._connect_usb_camera()
-            
+
+            # 每次连接前重新从接口拉取最新 RTSP URL
+            # 原因：部分摄像头的 RTSP 地址带 session token，token 有过期时间
+            # 断线重连时若继续用旧 URL，摄像头会返回 500 Internal Server Error
+            try:
+                fresh = self.db.get_camera_by_id(self.camera_id)
+                if fresh and fresh.get('rtspssl') and not fresh['rtspssl'].startswith('usb:'):
+                    new_url = fresh['rtspssl']
+                    if new_url != self.rtsp_url:
+                        logger.info(f"[{self.camera_name}] RTSP URL 已刷新（token 更新）")
+                        self.rtsp_url = new_url
+            except Exception as e:
+                logger.warning(f"[{self.camera_name}] 刷新 RTSP URL 失败，沿用旧地址: {e}")
+
             # 使用OpenCV连接
             logger.info(f"正在连接RTSP流: {self.rtsp_url}")
             rtsp_url = self._prepare_rtsp_url(self.rtsp_url, 'tcp')
@@ -484,7 +497,7 @@ class CameraMonitor:
             self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else 1900)
             try:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
-                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, rtsp_timeout_ms)  # 读取超时，防止掉线时 cap.read() 永久阻塞
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, rtsp_timeout_ms)
             except: pass
 
             time.sleep(1.0)

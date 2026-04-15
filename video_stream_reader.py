@@ -106,7 +106,7 @@ class VideoStreamReader:
 
         self.started = True
         consecutive_failures = 0
-        max_consecutive_failures = 600  # 每次失败 sleep 0.1s，600次 = 60秒，容忍短暂网络抖动
+        max_consecutive_failures = 10  # 连续失败10次则停止，触发外层重连
 
         while self.running:
             try:

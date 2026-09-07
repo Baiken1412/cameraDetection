@@ -12,3 +12,12 @@ data/detection_visualization/
 
 # IDE
 .idea/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Real key material and issued licenses — never commit
+private_key.pem
+license_*.dat
+*.keystore

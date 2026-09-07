@@ -6,11 +6,11 @@ from pathlib import Path
 
 # 数据库配置
 DATABASE_CONFIG = {
-    'host': 'localhost',
-    'port': 3306,
-    'user': 'root',
-    'password': '1412',
-    'database': 'caseappdb',
+    'host': os.environ.get('DB_HOST', 'localhost'),
+    'port': int(os.environ.get('DB_PORT', '3306')),
+    'user': os.environ.get('DB_USER', 'root'),
+    'password': os.environ.get('DB_PASSWORD', ''),
+    'database': os.environ.get('DB_NAME', 'caseappdb'),
     'charset': 'utf8mb4'
 }
 
@@ -186,7 +186,7 @@ REID_CONFIG = {
     'flask_host': '0.0.0.0',  # Flask服务地址
     'flask_port': 5000,  # Flask服务端口
     'flask_debug': True,  # Flask调试模式
-    'secret_key': 'caseapp-reid-secret-key-2024',  # Flask密钥
+    'secret_key': os.environ.get('FLASK_SECRET_KEY', 'dev-only-change-me'),  # Flask密钥
 }
 
 # ReID数据库配置（已与主库合并，使用与 DATABASE_CONFIG 相同的数据源）

@@ -344,9 +344,9 @@ HTML_TEMPLATE = """
 
                 // 生成下拉选项
                 const optionsHtml = empList.map(emp => {
-                    const selected = (group.group_name && group.group_name === mj.empname) ? 'selected' : '';
-                    const label = mj.empno ? `${mj.empno} - ${mj.empname}` : mj.empname;
-                    return `<option value="${mj.empname}" ${selected}>${label}</option>`;
+                    const selected = (group.group_name && group.group_name === emp.empname) ? 'selected' : '';
+                    const label = emp.empno ? `${emp.empno} - ${emp.empname}` : emp.empname;
+                    return `<option value="${emp.empname}" ${selected}>${label}</option>`;
                 }).join('');
 
                 div.innerHTML = `

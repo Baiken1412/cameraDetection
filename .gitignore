@@ -6,5 +6,9 @@ models/
 # Logs
 logs/
 
+# Real people's cropped face/body photos captured from camera feeds — privacy, never commit
+data/cropped_persons/
+data/detection_visualization/
+
 # IDE
 .idea/
